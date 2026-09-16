@@ -37,3 +37,7 @@ temp/
 *.bak
 *.orig
 
+# ===== AI 协作数据例外（.ai 已纳入版本库管理）=====
+!.ai/logs/
+!.ai/logs/*.log
+
