@@ -1,0 +1,68 @@
+# 看板 Agent · 基础设施（PG + Milvus）
+#
+# make db-up / make db-down 管理本文件。端口与本机现有实例错开（5433/19531）。
+# 首次启动自动创建 board / board_test 库（scripts/pg-init/init.sql）。
+# 启动：make db-up（等价 docker compose up -d）
+
+services:
+  pg:
+    image: postgres:16-alpine
+    container_name: board-pg
+    ports:
+      - "5433:5432"        # 本机 5433（5432 被现有实例占用）
+    environment:
+      POSTGRES_USER: board
+      POSTGRES_PASSWORD: board
+      POSTGRES_DB: board
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/pg-init:/docker-entrypoint-initdb.d:ro   # 首次初始化自动建 board_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U board -d board"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    container_name: board-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcddata:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+
+  minio:
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    container_name: board-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - miniodata:/minio_data
+    command: minio server /minio_data
+
+  milvus:
+    image: milvusdb/milvus:v2.5.0
+    container_name: board-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvusdata:/var/lib/milvus
+    ports:
+      - "19531:19530"      # 本机 19531（19530 被现有实例占用）
+      - "9092:9091"
+    depends_on:
+      - etcd
+      - minio
+
+volumes:
+  pgdata:
+  etcddata:
+  miniodata:
+  milvusdata:

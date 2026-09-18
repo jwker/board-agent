@@ -37,6 +37,11 @@ temp/
 *.bak
 *.orig
 
+# ===== 环境变量（密钥不进版本库，模板见 .env.example）=====
+.env
+.env.test
+.env.*.local
+
 # ===== AI 协作数据例外（.ai 已纳入版本库管理）=====
 !.ai/logs/
 !.ai/logs/*.log
