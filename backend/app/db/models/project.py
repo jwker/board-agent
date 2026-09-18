@@ -14,6 +14,9 @@ class Project(Base, TimestampMixin):
 
     name: Mapped[str] = mapped_column(unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)  # 项目介绍（简报静态部分，系统内）
+    directory: Mapped[str | None] = mapped_column(Text)  # 授权目录（AI 工作边界）
+    directory_status: Mapped[str | None] = mapped_column(default=None)  # existing / empty
+    agent_md: Mapped[str | None] = mapped_column(Text)  # 项目规范（创建时写入 <目录>/AGENT.md）
     status: Mapped[str] = mapped_column(default=ProjectStatus.ACTIVE.value, nullable=False)
 
     cards = relationship(

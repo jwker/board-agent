@@ -1,0 +1,532 @@
+<script setup lang="ts">
+import { computed, onMounted, ref, watch, type Ref } from "vue";
+import { useRouter } from "vue-router";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { ArrowDown, Lock, MoreFilled, Plus, Search } from "@element-plus/icons-vue";
+import { VueDraggable } from "vue-draggable-plus";
+
+import { getProject, type Project } from "@/api/projects";
+import { TYPE_LABELS, typeTagStyle } from "@/constants/card";
+import {
+  type Card,
+  type CardStatus,
+  type CardType,
+  type Priority,
+  updateCard,
+} from "@/api/cards";
+import { useCardsStore } from "@/stores/cards";
+import { useProjectsStore } from "@/stores/projects";
+import CardFormDialog from "@/components/CardFormDialog.vue";
+
+const props = defineProps<{ projectId: string }>();
+const router = useRouter();
+const cardsStore = useCardsStore();
+const projectsStore = useProjectsStore();
+
+const projectId = Number(props.projectId);
+const project = ref<Project | null>(null);
+const search = ref("");
+const dialogVisible = ref(false);
+const editingCard = ref<Card | null>(null);
+const createStatus = ref<CardStatus>("backlog");
+
+const COLUMNS: { key: CardStatus; label: string; stripe: string }[] = [
+  { key: "backlog", label: "积压", stripe: "#c9cdd4" },
+  { key: "todo", label: "待办", stripe: "#409eff" },
+  { key: "in_progress", label: "进行中", stripe: "#e6a23c" },
+  { key: "done", label: "已完成", stripe: "#67c23a" },
+];
+
+const allProjects = computed(() => {
+  const list = [...projectsStore.projects];
+  if (project.value && !list.some((p) => p.id === project.value!.id)) {
+    list.unshift(project.value);
+  }
+  return list.filter((p) => p.status === "active");
+});
+
+function switchProject(command: string | number) {
+  if (command === "all") {
+    router.push("/");
+    return;
+  }
+  const id = Number(command);
+  if (id !== projectId) router.push(`/projects/${id}/board`);
+}
+
+const PRIORITY_LABELS: Record<Priority, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
+onMounted(async () => {
+  try {
+    project.value = await getProject(projectId);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "加载项目失败");
+  }
+  await projectsStore.fetchProjects();
+  await cardsStore.fetchCards(projectId);
+});
+
+const cardsByStatus = computed(() => {
+  const kw = search.value.trim().toLowerCase();
+  const map: Record<string, Card[]> = { backlog: [], todo: [], in_progress: [], done: [], archived: [] };
+  for (const card of cardsStore.cards) {
+    if (card.status === "archived") continue; // 归档卡不在看板列展示（后续归档区）
+    if (kw) {
+      const hay = `${card.title} ${card.content} ${(card.custom_tags ?? []).join(" ")}`.toLowerCase();
+      if (!hay.includes(kw)) continue;
+    }
+    (map[card.status] ??= []).push(card);
+  }
+  return map;
+});
+
+/* ---- 拖拽（vue-draggable-plus 跨列移动） ---- */
+const columnLists: Record<CardStatus, Ref<Card[]>> = {
+  backlog: ref<Card[]>([]),
+  todo: ref<Card[]>([]),
+  in_progress: ref<Card[]>([]),
+  done: ref<Card[]>([]),
+  archived: ref<Card[]>([]),
+};
+
+function refreshColumns() {
+  for (const col of COLUMNS) {
+    columnLists[col.key].value = cardsStore.cards.filter((c) => c.status === col.key);
+  }
+}
+watch(() => cardsStore.cards, refreshColumns, { immediate: true, deep: true });
+
+let dragging = false;
+function dragStart() {
+  dragging = true;
+}
+function dragEnd() {
+  // 拖拽结束后可能还会触发一次 click，延迟清除标志以拦截
+  setTimeout(() => {
+    dragging = false;
+  }, 0);
+}
+function cardClick(card: Card) {
+  if (dragging) return;
+  openDetail(card);
+}
+
+function onAdd(colKey: CardStatus, evt: { newIndex: number }) {
+  const card = columnLists[colKey].value[evt.newIndex];
+  if (card) moveCard(card, colKey);
+}
+
+function onMoveCommand(card: Card, target: string) {
+  moveCard(card, target as CardStatus);
+}
+
+async function moveCard(card: Card, target: CardStatus) {
+  if (card.status === target) return;
+  if (target === "done" || target === "in_progress") {
+    try {
+      await ElMessageBox.confirm(
+        target === "done"
+          ? `确定将「${card.title || "未命名卡片"}」标记为已完成？完成后 AI 会总结该卡片。`
+          : `确定将「${card.title || "未命名卡片"}」移入进行中？将触发 AI 执行该卡片。`,
+        target === "done" ? "标记完成" : "移入进行中",
+        { type: "warning", confirmButtonText: "确定", cancelButtonText: "取消" },
+      );
+    } catch {
+      refreshColumns(); // 取消：恢复原列位置
+      return;
+    }
+  }
+  try {
+    const updated = await updateCard(card.id, { status: target });
+    cardsStore.replaceCard(updated);
+    ElMessage.success(`已移入「${COLUMNS.find((c) => c.key === target)!.label}」`);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "移动失败");
+    refreshColumns();
+  }
+}
+
+/* ---- 新建 / 编辑弹窗（复用 CardFormDialog） ---- */
+function openCreate(status: CardStatus = "backlog") {
+  editingCard.value = null;
+  createStatus.value = status;
+  dialogVisible.value = true;
+}
+
+function openEdit(card: Card) {
+  editingCard.value = card;
+  dialogVisible.value = true;
+}
+
+function openDetail(card: Card) {
+  router.push(`/projects/${projectId}/board/cards/${card.id}`);
+}
+
+function dueInDays(due: string): string {
+  const diff = Math.ceil((new Date(due).getTime() - Date.now()) / 86400000);
+  if (diff < 0) return `已逾期 ${-diff} 天`;
+  if (diff === 0) return "今天截止";
+  return `剩 ${diff} 天`;
+}
+</script>
+
+<template>
+  <div class="board">
+    <div class="board-head">
+      <el-dropdown trigger="click" @command="switchProject">
+        <div class="project-title">
+          <span class="project-name-text">{{ project ? project.name : "看板" }}</span>
+          <el-icon class="title-caret"><ArrowDown /></el-icon>
+        </div>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item
+              v-for="p in allProjects"
+              :key="p.id"
+              :command="p.id"
+              :disabled="p.id === projectId"
+            >
+              <span :class="{ current: p.id === projectId }">{{ p.name }}</span>
+            </el-dropdown-item>
+            <el-dropdown-item command="all" divided>全部项目</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+      <div class="head-actions">
+        <el-input
+          v-model="search"
+          class="search-input"
+          :prefix-icon="Search"
+          placeholder="搜索卡片…（标题 / 内容 / 标签）"
+          clearable
+          style="width: 300px"
+        />
+        <el-button type="primary" :icon="Plus" @click="openCreate()">新建卡片</el-button>
+      </div>
+    </div>
+
+    <div v-if="cardsStore.loading" v-loading="true" class="board-loading" />
+
+    <el-alert
+      v-else-if="cardsStore.error"
+      :title="cardsStore.error"
+      type="error"
+      :closable="false"
+      show-icon
+    />
+
+    <div v-else class="board-columns">
+      <div v-for="col in COLUMNS" :key="col.key" class="column">
+        <div class="column-head">
+          <span class="column-stripe" :style="{ background: col.stripe }"></span>
+          <span class="column-label">{{ col.label }}</span>
+          <span class="column-count">{{ cardsByStatus[col.key].length }}</span>
+        </div>
+        <div class="column-body">
+          <VueDraggable
+            v-model="columnLists[col.key].value"
+            class="column-draggable"
+            group="cards"
+            :animation="150"
+            ghost-class="card-ghost"
+            :sort="true"
+            @start="dragStart"
+            @end="dragEnd"
+            @add="(e: any) => onAdd(col.key, e)"
+          >
+            <el-card
+              v-for="card in columnLists[col.key].value"
+              :key="card.id"
+              shadow="hover"
+              class="card-item"
+              @click="cardClick(card)"
+            >
+              <div class="card-title">
+                <el-icon v-if="card.read_only" class="lock-icon"><Lock /></el-icon>
+                <span class="title-text">{{ card.title || "未命名卡片" }}</span>
+                <el-dropdown
+                  trigger="click"
+                  class="card-more"
+                  @command="(cmd: string) => onMoveCommand(card, cmd)"
+                  @click.stop
+                >
+                  <el-button text :icon="MoreFilled" size="small" @click.stop />
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item
+                        v-for="c in COLUMNS"
+                        :key="c.key"
+                        :command="c.key"
+                        :disabled="c.key === card.status"
+                      >移到{{ c.label }}</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </div>
+              <div v-if="card.content" class="card-desc">{{ card.content }}</div>
+              <div class="card-meta">
+                <el-tag :style="typeTagStyle(card.card_type)" size="small" effect="light">
+                  {{ TYPE_LABELS[card.card_type] }}
+                </el-tag>
+                <el-tag
+                  :type="card.priority === 'high' ? 'danger' : card.priority === 'medium' ? 'warning' : 'info'"
+                  size="small"
+                  effect="plain"
+                >{{ PRIORITY_LABELS[card.priority] }}优先级</el-tag>
+                <el-tag v-if="card.due_date" size="small" type="info" effect="plain">
+                  {{ dueInDays(card.due_date) }}
+                </el-tag>
+              </div>
+              <div v-if="card.custom_tags.length" class="card-tags">
+                <el-tag v-for="t in card.custom_tags" :key="t" size="small" type="info">
+                  {{ t }}
+                </el-tag>
+              </div>
+            </el-card>
+          </VueDraggable>
+          <el-empty
+            v-if="columnLists[col.key].value.length === 0"
+            :image-size="50"
+            description="暂无卡片"
+          />
+        </div>
+        <el-button class="column-add" :icon="Plus" @click="openCreate(col.key)">新建卡片</el-button>
+      </div>
+    </div>
+
+    <CardFormDialog
+      v-model="dialogVisible"
+      :project-id="projectId"
+      :card="editingCard"
+      :default-status="createStatus"
+    />
+  </div>
+</template>
+
+<style scoped>
+.board {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.project-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 2px 8px 2px 0;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+.project-title:hover {
+  background: #f2f3f5;
+}
+.project-name-text {
+  font-size: 20px;
+  font-weight: 700;
+  color: #303133;
+}
+.title-caret {
+  color: #c0c4cc;
+  font-size: 13px;
+  transition: transform 0.15s;
+}
+.project-title:hover .title-caret {
+  color: #909399;
+}
+.current {
+  font-weight: 700;
+  color: #409eff;
+}
+.board-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.search-input :deep(.el-input__wrapper) {
+  background: #fff;
+  box-shadow: 0 0 0 1px #e4e7ed inset;
+  border-radius: 10px;
+  transition: box-shadow 0.2s;
+}
+.search-input :deep(.el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px #c0c4cc inset;
+}
+.search-input :deep(.el-input__wrapper.is-focus) {
+  background: #fff;
+  box-shadow: 0 0 0 1px #409eff inset;
+}
+.search-input :deep(.el-input__inner) {
+  color: #303133;
+}
+.search-input :deep(.el-input__inner::placeholder) {
+  color: #a8abb2;
+}
+.board-loading {
+  min-height: 300px;
+}
+.board-columns {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  justify-content: center;
+}
+.column {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 360px;
+  background: #f5f7fa;
+  border-radius: 10px;
+  padding: 10px;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.column-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+}
+.column-stripe {
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.column-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #606266;
+}
+.column-count {
+  font-size: 12px;
+  color: #909399;
+  background: #e4e7ed;
+  border-radius: 10px;
+  padding: 0 8px;
+  line-height: 18px;
+}
+.column-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 60px;
+}
+.column-draggable {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 40px;
+}
+.column-add {
+  width: 100%;
+  border: none;
+  background: #fff;
+  color: #606266;
+}
+.column-add:hover {
+  background: #fff;
+  color: #409eff;
+}
+.card-item {
+  cursor: grab;
+  border-radius: 10px;
+}
+.card-item:active {
+  cursor: grabbing;
+}
+.card-ghost {
+  opacity: 0.4;
+  border: 1px dashed #409eff;
+}
+.card-ghost :deep(.el-card__body) {
+  padding: 0;
+}
+.card-item :deep(.el-card__body) {
+  padding: 12px 14px;
+}
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 10px;
+}
+.card-more {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-desc {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+.lock-icon {
+  color: #909399;
+  flex-shrink: 0;
+}
+.card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.form-hint {
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+
+/* 移动端：单列 + 左右滚动切换列 */
+@media (max-width: 768px) {
+  .board-columns {
+    overflow-x: auto;
+    justify-content: flex-start;
+    gap: 12px;
+    padding-bottom: 10px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .column {
+    flex: 0 0 80vw;
+    max-width: 80vw;
+  }
+  .board-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .head-actions {
+    width: 100%;
+  }
+  .head-actions .el-input {
+    flex: 1;
+  }
+}
+</style>

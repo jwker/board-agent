@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import artifacts, health
+from app.api import artifacts, cards, comments, health, projects
 from app.core.config import settings
 from app.core.logging import setup_logging
 
@@ -24,3 +24,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(artifacts.router)
+app.include_router(projects.router)
+app.include_router(cards.router)
+app.include_router(comments.router)

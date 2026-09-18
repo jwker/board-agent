@@ -32,7 +32,7 @@ class Card(Base, TimestampMixin):
     )
 
 
-class Comment(Base):
+class Comment(Base, TimestampMixin):
     """评论（Issue 回帖流；AI 评论以 thread_id 短标识为作者名）。"""
 
     __tablename__ = "comments"
