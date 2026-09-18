@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { ArrowLeft, EditPen } from "@element-plus/icons-vue";
@@ -72,7 +72,20 @@ onMounted(async () => {
   } catch {
     /* 未配置模型时下拉为空 */
   }
+  window.addEventListener("ws-reconnected", reloadData);
 });
+
+async function reloadData(): Promise<void> {
+  // WS 重连后全量重拉当前视图（TECH-DESIGN §4 断线补偿）
+  try {
+    card.value = await getCard(Number(props.cardId));
+    comments.value = await listComments(card.value.id);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "刷新失败");
+  }
+}
+
+onBeforeUnmount(() => window.removeEventListener("ws-reconnected", reloadData));
 
 function changeSessionModel(v: string) {
   sessionModel.value = v;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch, type Ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { ArrowDown, ChatDotRound, FolderOpened, Lock, MoreFilled, Plus, Search } from "@element-plus/icons-vue";
@@ -80,6 +80,14 @@ onMounted(async () => {
     /* 配置缺失时用默认值 */
   }
 });
+
+function onWsReconnected(): void {
+  // WS 重连后全量重拉当前视图（TECH-DESIGN §4 断线补偿）
+  cardsStore.fetchCards(projectId);
+}
+
+onMounted(() => window.addEventListener("ws-reconnected", onWsReconnected));
+onBeforeUnmount(() => window.removeEventListener("ws-reconnected", onWsReconnected));
 
 async function openAutoClaim(): Promise<void> {
   try {

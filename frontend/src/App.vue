@@ -7,7 +7,7 @@ import { useNoticeStore } from "./stores/notices";
 
 const router = useRouter();
 const route = useRoute();
-const { unreadCount, drawerOpen, notices, loading, categoryLabel, openDrawer, closeDrawer, readOne, readAll, startPolling, stopPolling } =
+const { unreadCount, drawerOpen, notices, loading, categoryLabel, openDrawer, closeDrawer, readOne, readAll, setupWS } =
   useNoticeStore();
 
 function formatTime(iso: string): string {
@@ -32,11 +32,11 @@ function clickNotice(n: (typeof notices.value)[number]): void {
 }
 
 onMounted(() => {
-  startPolling();
+  const teardown = setupWS();
   window.addEventListener("notice-jump", onNoticeJump);
+  window.addEventListener("beforeunload", teardown);
 });
 onBeforeUnmount(() => {
-  stopPolling();
   window.removeEventListener("notice-jump", onNoticeJump);
 });
 </script>
