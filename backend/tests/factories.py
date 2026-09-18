@@ -28,6 +28,7 @@ async def make_card(session: AsyncSession, project: Project | None = None, **ove
         "title": "测试卡片",
         "content": "主贴内容",
         "card_type": CardType.TASK.value,
+        "custom_tags": [],
         "priority": Priority.MEDIUM.value,
         "status": CardStatus.BACKLOG.value,
         "read_only": False,

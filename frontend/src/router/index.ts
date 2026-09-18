@@ -30,6 +30,16 @@ const router = createRouter({
       name: "settings",
       component: () => import("../views/GlobalSettingsView.vue"),
     },
+    {
+      path: "/settings/llm",
+      name: "llm-settings",
+      component: () => import("../views/LLMSettingsView.vue"),
+    },
+    {
+      path: "/settings/vector",
+      name: "vector-settings",
+      component: () => import("../views/VectorSettingsView.vue"),
+    },
   ],
 });
 

@@ -47,5 +47,6 @@ class CardOut(BaseModel):
     remark: str | None
     read_only: bool
     archived_from: str | None
+    comment_count: int = 0  # 评论数（列表查询时填充；单卡详情不展示）
     created_at: datetime
     updated_at: datetime

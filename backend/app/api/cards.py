@@ -22,8 +22,8 @@ def _validate_enum(value: str, enum_cls: type, field: str) -> None:
 
 
 @router.get("/projects/{project_id}/cards", response_model=list[CardOut])
-async def list_cards(project_id: int, session: AsyncSession = Depends(get_session)) -> list[Card]:
-    """项目内全部卡片（前端按状态分组；含归档）。"""
+async def list_cards(project_id: int, session: AsyncSession = Depends(get_session)) -> list[CardOut]:
+    """项目内全部卡片（前端按状态分组；含归档）。附带 comment_count。"""
     project = await session.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")

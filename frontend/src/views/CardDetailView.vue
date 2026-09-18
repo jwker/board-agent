@@ -8,6 +8,7 @@ import { getCard, updateCard, type Card } from "@/api/cards";
 import { TYPE_LABELS, typeTagStyle } from "@/constants/card";
 import { getProject, type Project } from "@/api/projects";
 import { createComment, listComments, type Comment } from "@/api/comments";
+import { getLLMSettings, type LLMSettings } from "@/api/settings";
 import { useCardsStore } from "@/stores/cards";
 import CardFormDialog from "@/components/CardFormDialog.vue";
 
@@ -21,6 +22,19 @@ const comments = ref<Comment[]>([]);
 const newComment = ref("");
 const sending = ref(false);
 const editVisible = ref(false);
+const llmSettings = ref<LLMSettings>({ providers: [], default: null });
+const sessionModel = ref("");
+
+const modelOptions = computed(() => {
+  const opts: { value: string; label: string }[] = [];
+  for (const p of llmSettings.value.providers) {
+    for (const m of p.models) {
+      const label = m.display === m.request ? m.display : `${m.display}（${m.request}）`;
+      opts.push({ value: `${p.id}::${m.request}`, label: `${p.name} / ${label}` });
+    }
+  }
+  return opts;
+});
 
 const STATUS_LABELS: Record<string, string> = {
   backlog: "积压",
@@ -46,7 +60,26 @@ onMounted(async () => {
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "加载失败");
   }
+  try {
+    llmSettings.value = await getLLMSettings();
+    // 会话级模型：优先记住上次选择，其次全局默认
+    const saved = localStorage.getItem("session-model");
+    if (saved && modelOptions.value.some((o) => o.value === saved)) {
+      sessionModel.value = saved;
+    } else if (llmSettings.value.default?.provider_id) {
+      sessionModel.value = `${llmSettings.value.default.provider_id}::${llmSettings.value.default.model}`;
+    }
+  } catch {
+    /* 未配置模型时下拉为空 */
+  }
 });
+
+function changeSessionModel(v: string) {
+  sessionModel.value = v;
+  localStorage.setItem("session-model", v);
+  const label = modelOptions.value.find((o) => o.value === v)?.label ?? v;
+  ElMessage.success(`会话模型：${label}`);
+}
 
 const sessionLabel = computed(() =>
   card.value ? `会话 #${Math.abs(card.value.id * 7919).toString(16).toUpperCase().slice(0, 4)}` : "",
@@ -95,6 +128,10 @@ function goBack() {
     router.push(`/projects/${props.projectId}/board`);
   }
 }
+
+function shortThreadId(threadId: string | null): string {
+  return threadId ? threadId.slice(0, 6) : "?";
+}
 </script>
 
 <template>
@@ -106,9 +143,14 @@ function goBack() {
         <el-switch :model-value="card.read_only" @change="toggleReadOnly" />
         <el-tag v-if="card.read_only" size="small" type="primary" effect="plain">AI 不写文件、仅只读命令</el-tag>
         <span class="cfg-label">模型</span>
-        <el-select disabled placeholder="会话模型（阶段 3 接入）" style="width: 180px">
-          <el-option label="DeepSeek Chat（默认）" value="deepseek-chat" />
-          <el-option label="DeepSeek Reasoner" value="deepseek-reasoner" />
+        <el-select
+          v-model="sessionModel"
+          placeholder="选择会话模型"
+          style="width: 180px"
+          :disabled="modelOptions.length === 0"
+          @change="changeSessionModel"
+        >
+          <el-option v-for="o in modelOptions" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </div>
     </div>
@@ -148,7 +190,9 @@ function goBack() {
               <div class="i-body">
                 <div class="i-head">
                   <span class="name">{{ c.author === "ai" ? sessionLabel : "我" }}</span>
-                  <el-tag v-if="c.author === 'ai'" size="small" type="warning" effect="plain">AI · 对话 ID</el-tag>
+                  <el-tag v-if="c.author === 'ai'" size="small" type="warning" effect="plain">
+                    AI · 对话 #{{ shortThreadId(c.thread_id) }}
+                  </el-tag>
                   <span class="meta">{{ formatTime(c.created_at) }}</span>
                 </div>
                 <div class="i-content">{{ c.content }}</div>

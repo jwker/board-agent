@@ -27,6 +27,7 @@ export interface Card {
   remark: string | null;
   read_only: boolean;
   archived_from: CardStatus | null;
+  comment_count: number;
   created_at: string;
   updated_at: string;
 }

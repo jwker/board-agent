@@ -49,3 +49,16 @@ async def test_existing_comments_from_factory(session, client):
     assert len(comments) == 2
     assert comments[1]["thread_id"] == "ABC1"
     assert comments[1]["author"] == "ai"
+
+
+async def test_list_cards_comment_count(session, client):
+    """卡片列表响应带 comment_count。"""
+    project = await make_project(session, name="评论数")
+    card = await make_card(session, project=project, title="卡")
+    await make_comment(session, card=card, author=CommentAuthor.USER.value, content="一")
+    await make_comment(session, card=card, author=CommentAuthor.USER.value, content="二")
+    await session.commit()
+
+    cards = (await client.get(f"/api/projects/{project.id}/cards")).json()
+    assert len(cards) == 1
+    assert cards[0]["comment_count"] == 2

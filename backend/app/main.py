@@ -5,7 +5,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import artifacts, cards, comments, health, projects
+from app.api import artifacts, cards, comments, health, notices, projects
+from app.api.settings import router as settings_router
 from app.core.config import settings
 from app.core.logging import setup_logging
 
@@ -27,3 +28,5 @@ app.include_router(artifacts.router)
 app.include_router(projects.router)
 app.include_router(cards.router)
 app.include_router(comments.router)
+app.include_router(notices.router)
+app.include_router(settings_router)

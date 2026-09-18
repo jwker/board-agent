@@ -58,7 +58,7 @@ async def set_prefs(session: AsyncSession, prefs: dict) -> dict:
     else:
         row.value = clean
     await session.commit()
-    return clean
+    return await get_prefs(session)  # 返回合并默认后的完整勾选状态
 
 
 async def notify(

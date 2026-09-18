@@ -72,7 +72,10 @@ async def test_prefs_default_all_on_and_roundtrip(session):
     saved = await notice_service.set_prefs(
         session, {NoticeCategory.CLARIFY.value: False, "unknown": True}
     )
-    assert saved == {NoticeCategory.CLARIFY.value: False}
+    # set 返回合并默认后的完整勾选状态
+    assert saved[NoticeCategory.CLARIFY.value] is False
+    assert "unknown" not in saved
+    assert saved[NoticeCategory.COMPLETED.value] is True
 
     got = await notice_service.get_prefs(session)
     assert got[NoticeCategory.CLARIFY.value] is False

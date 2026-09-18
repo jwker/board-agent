@@ -32,6 +32,11 @@ class Card(Base, TimestampMixin):
         "Comment", back_populates="card", cascade="all, delete-orphan", lazy="selectin"
     )
 
+    @property
+    def comment_count(self) -> int:
+        """评论数（comments 已 selectin 加载）。"""
+        return len(self.comments)
+
 
 class Comment(Base, TimestampMixin):
     """评论（Issue 回帖流；AI 评论以 thread_id 短标识为作者名）。"""

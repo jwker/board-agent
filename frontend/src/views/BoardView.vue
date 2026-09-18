@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, FolderOpened, Lock, MoreFilled, Plus, Search } from "@element-plus/icons-vue";
+import { ArrowDown, ChatDotRound, FolderOpened, Lock, MoreFilled, Plus, Search } from "@element-plus/icons-vue";
 import { VueDraggable } from "vue-draggable-plus";
 
 import { getProject, type Project } from "@/api/projects";
@@ -18,6 +18,7 @@ import {
 } from "@/api/cards";
 import { useCardsStore } from "@/stores/cards";
 import { useProjectsStore } from "@/stores/projects";
+import { getAutoClaim, saveAutoClaim, type AutoClaimSettings } from "@/api/settings";
 import CardFormDialog from "@/components/CardFormDialog.vue";
 
 const props = defineProps<{ projectId: string }>();
@@ -32,6 +33,8 @@ const dialogVisible = ref(false);
 const editingCard = ref<Card | null>(null);
 const createStatus = ref<CardStatus>("backlog");
 const archiveVisible = ref(false);
+const autoClaim = ref<AutoClaimSettings>({ enabled: false, start_time: "22:00", end_time: "08:00" });
+const autoClaimVisible = ref(false);
 
 const COLUMNS: { key: CardStatus; label: string; stripe: string }[] = [
   { key: "backlog", label: "积压", stripe: "#c9cdd4" },
@@ -71,7 +74,31 @@ onMounted(async () => {
   }
   await projectsStore.fetchProjects();
   await cardsStore.fetchCards(projectId);
+  try {
+    autoClaim.value = await getAutoClaim(projectId);
+  } catch {
+    /* 配置缺失时用默认值 */
+  }
 });
+
+async function openAutoClaim(): Promise<void> {
+  try {
+    autoClaim.value = await getAutoClaim(projectId);
+  } catch {
+    /* 保持默认 */
+  }
+  autoClaimVisible.value = true;
+}
+
+async function saveAutoClaimConfig(): Promise<void> {
+  try {
+    autoClaim.value = await saveAutoClaim(projectId, autoClaim.value);
+    autoClaimVisible.value = false;
+    ElMessage.success(autoClaim.value.enabled ? "已开启自动领取" : "已关闭自动领取");
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "保存失败");
+  }
+}
 
 const cardsByStatus = computed(() => {
   const kw = search.value.trim().toLowerCase();
@@ -264,6 +291,13 @@ function dueInDays(due: string): string {
           clearable
           style="width: 300px"
         />
+        <el-button
+          class="auto-claim-btn"
+          :class="{ on: autoClaim.enabled }"
+          @click="openAutoClaim()"
+        >
+          自动领取{{ autoClaim.enabled ? `（${autoClaim.start_time}-${autoClaim.end_time}）` : "" }}
+        </el-button>
         <el-button :icon="FolderOpened" @click="archiveVisible = true">归档区</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate()">新建卡片</el-button>
       </div>
@@ -341,6 +375,9 @@ function dueInDays(due: string): string {
                 <el-tag v-if="card.due_date" size="small" type="info" effect="plain">
                   {{ dueInDays(card.due_date) }}
                 </el-tag>
+                <span v-if="card.comment_count > 0" class="comment-count">
+                  <el-icon><ChatDotRound /></el-icon>{{ card.comment_count }}
+                </span>
               </div>
               <div v-if="card.custom_tags.length" class="card-tags">
                 <el-tag v-for="t in card.custom_tags" :key="t" size="small" type="info">
@@ -376,6 +413,30 @@ function dueInDays(due: string): string {
         </el-card>
       </div>
     </el-drawer>
+
+    <el-dialog v-model="autoClaimVisible" title="自动领取设置" width="420px">
+      <el-form label-width="90px" label-position="left">
+        <el-form-item label="自动领取">
+          <el-switch v-model="autoClaim.enabled" />
+          <span class="auto-tip">开启后，AI 会在设置的时间段内自动从「待办」领取任务</span>
+        </el-form-item>
+        <template v-if="autoClaim.enabled">
+          <el-form-item label="开始时间">
+            <el-time-select v-model="autoClaim.start_time" start="00:00" step="00:30" end="23:30" placeholder="开始" />
+          </el-form-item>
+          <el-form-item label="结束时间">
+            <el-time-select v-model="autoClaim.end_time" start="00:00" step="00:30" end="23:30" placeholder="结束" />
+          </el-form-item>
+          <el-form-item label=" ">
+            <div class="auto-cross">支持跨天（如 22:00 → 08:00），此时 AI 在夜间自动领取</div>
+          </el-form-item>
+        </template>
+      </el-form>
+      <template #footer>
+        <el-button @click="autoClaimVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveAutoClaimConfig">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -426,6 +487,27 @@ function dueInDays(due: string): string {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+.auto-claim-btn {
+  color: #8a5a00;
+  background: #fef3e0;
+  border-color: #d48806;
+}
+.auto-claim-btn:hover,
+.auto-claim-btn.on {
+  color: #8a5a00;
+  background: #fdebd0;
+  border-color: #d48806;
+}
+.auto-tip {
+  font-size: 12px;
+  color: #909399;
+  margin-left: 10px;
+}
+.auto-cross {
+  font-size: 12px;
+  color: #c0c4cc;
+  line-height: 1.5;
 }
 .search-input :deep(.el-input__wrapper) {
   background: #fff;
@@ -563,6 +645,15 @@ function dueInDays(due: string): string {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  align-items: center;
+}
+.comment-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: #909399;
+  margin-left: auto;
 }
 .card-tags {
   display: flex;
