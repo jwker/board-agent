@@ -127,3 +127,68 @@ async def test_update_card_fields(session, client):
 async def test_update_missing_card(session, client):
     resp = await client.patch("/api/cards/99999", json={"title": "x"})
     assert resp.status_code == 404
+
+
+async def test_state_machine_transitions(session, client):
+    """状态机（2.3）：四态自由迁移；归档必须走专用接口；归档卡改状态 409。"""
+    project = await make_project(session, name="状态机项目")
+    await session.commit()
+    cid = (
+        await client.post(
+            f"/api/projects/{project.id}/cards", json={"title": "迁移", "content": "内容", "status": "backlog"}
+        )
+    ).json()["id"]
+
+    # 四态自由迁移（确认语义在前端，API 放行）
+    for target in ("todo", "in_progress", "done", "in_progress", "backlog", "todo"):
+        resp = await client.patch(f"/api/cards/{cid}", json={"status": target})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == target
+
+    # PATCH 直接改 archived → 409
+    resp = await client.patch(f"/api/cards/{cid}", json={"status": "archived"})
+    assert resp.status_code == 409
+
+    # 归档走专用接口：记录归档前状态
+    resp = await client.post(f"/api/cards/{cid}/archive")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "archived"
+    assert body["archived_from"] == "todo"
+
+    # 归档后 PATCH 状态 → 409
+    resp = await client.patch(f"/api/cards/{cid}", json={"status": "backlog"})
+    assert resp.status_code == 409
+
+    # 重复归档 → 409
+    resp = await client.post(f"/api/cards/{cid}/archive")
+    assert resp.status_code == 409
+
+    # 恢复：回到归档前状态
+    resp = await client.post(f"/api/cards/{cid}/restore")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "todo"
+    assert body["archived_from"] is None
+
+    # 未归档卡片 restore → 409
+    resp = await client.post(f"/api/cards/{cid}/restore")
+    assert resp.status_code == 409
+
+
+async def test_archive_in_progress_rejected(session, client):
+    """进行中卡片不允许归档（409）。"""
+    project = await make_project(session, name="归档限制项目")
+    await session.commit()
+    cid = (
+        await client.post(
+            f"/api/projects/{project.id}/cards", json={"title": "执行中", "content": "内容", "status": "in_progress"}
+        )
+    ).json()["id"]
+    resp = await client.post(f"/api/cards/{cid}/archive")
+    assert resp.status_code == 409
+    # 移出进行中后可归档
+    await client.patch(f"/api/cards/{cid}", json={"status": "todo"})
+    resp = await client.post(f"/api/cards/{cid}/archive")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "archived"

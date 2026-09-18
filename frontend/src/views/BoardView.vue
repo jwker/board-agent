@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, Lock, MoreFilled, Plus, Search } from "@element-plus/icons-vue";
+import { ArrowDown, FolderOpened, Lock, MoreFilled, Plus, Search } from "@element-plus/icons-vue";
 import { VueDraggable } from "vue-draggable-plus";
 
 import { getProject, type Project } from "@/api/projects";
@@ -13,6 +13,8 @@ import {
   type CardType,
   type Priority,
   updateCard,
+  archiveCard,
+  restoreCard,
 } from "@/api/cards";
 import { useCardsStore } from "@/stores/cards";
 import { useProjectsStore } from "@/stores/projects";
@@ -29,6 +31,7 @@ const search = ref("");
 const dialogVisible = ref(false);
 const editingCard = ref<Card | null>(null);
 const createStatus = ref<CardStatus>("backlog");
+const archiveVisible = ref(false);
 
 const COLUMNS: { key: CardStatus; label: string; stripe: string }[] = [
   { key: "backlog", label: "积压", stripe: "#c9cdd4" },
@@ -121,7 +124,63 @@ function onAdd(colKey: CardStatus, evt: { newIndex: number }) {
 }
 
 function onMoveCommand(card: Card, target: string) {
+  if (target === "archive") {
+    onArchive(card);
+    return;
+  }
   moveCard(card, target as CardStatus);
+}
+
+/* ---- 归档（用户主动触发，终态；恢复回原列） ---- */
+const archivedCards = computed(() =>
+  cardsStore.cards.filter((c) => c.status === "archived"),
+);
+
+function colLabel(status: string | null | undefined): string {
+  return COLUMNS.find((c) => c.key === status)?.label ?? "积压";
+}
+
+async function onArchive(card: Card) {
+  try {
+    await ElMessageBox.confirm(
+      `归档「${card.title || "未命名卡片"}」？归档后可随时恢复。`,
+      "归档卡片",
+      { type: "warning", confirmButtonText: "归档", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  try {
+    const updated = await archiveCard(card.id);
+    cardsStore.replaceCard(updated);
+    ElMessage.success("已归档");
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "归档失败");
+  }
+}
+
+async function onRestore(card: Card) {
+  const target = card.archived_from ?? "backlog";
+  if (target === "in_progress" || target === "done") {
+    try {
+      await ElMessageBox.confirm(
+        target === "in_progress"
+          ? `将恢复到「进行中」：AI 不自动触发，你评论后它才会继续。确定恢复？`
+          : `将恢复到「已完成」：卡片保持完成状态，不再重复 AI 收尾。确定恢复？`,
+        "恢复卡片",
+        { type: "warning", confirmButtonText: "恢复", cancelButtonText: "取消" },
+      );
+    } catch {
+      return;
+    }
+  }
+  try {
+    const updated = await restoreCard(card.id);
+    cardsStore.replaceCard(updated);
+    ElMessage.success(`已恢复到「${colLabel(updated.status)}」`);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "恢复失败");
+  }
 }
 
 async function moveCard(card: Card, target: CardStatus) {
@@ -205,6 +264,7 @@ function dueInDays(due: string): string {
           clearable
           style="width: 300px"
         />
+        <el-button :icon="FolderOpened" @click="archiveVisible = true">归档区</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate()">新建卡片</el-button>
       </div>
     </div>
@@ -263,6 +323,7 @@ function dueInDays(due: string): string {
                         :command="c.key"
                         :disabled="c.key === card.status"
                       >移到{{ c.label }}</el-dropdown-item>
+                      <el-dropdown-item command="archive" divided :disabled="card.status === 'in_progress'">归档</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
@@ -304,6 +365,17 @@ function dueInDays(due: string): string {
       :card="editingCard"
       :default-status="createStatus"
     />
+
+    <el-drawer v-model="archiveVisible" title="归档区" size="380px">
+      <el-empty v-if="archivedCards.length === 0" description="暂无归档卡片" :image-size="60" />
+      <div v-else class="arch-list">
+        <el-card v-for="c in archivedCards" :key="c.id" shadow="never" class="arch-item">
+          <div class="arch-title">{{ c.title || "未命名卡片" }}</div>
+          <div class="arch-meta">原列：{{ colLabel(c.archived_from) }}</div>
+          <el-button size="small" type="primary" text @click="onRestore(c)">恢复</el-button>
+        </el-card>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -503,6 +575,24 @@ function dueInDays(due: string): string {
   color: #909399;
   line-height: 1.6;
   margin-top: 4px;
+}
+.arch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.arch-item {
+  border-radius: 10px;
+}
+.arch-title {
+  font-weight: 600;
+  color: #303133;
+  word-break: break-word;
+}
+.arch-meta {
+  font-size: 12px;
+  color: #909399;
+  margin: 4px 0 8px;
 }
 
 /* 移动端：单列 + 左右滚动切换列 */

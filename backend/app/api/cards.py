@@ -79,7 +79,10 @@ async def update_card(
     body: CardUpdate,
     session: AsyncSession = Depends(get_session),
 ) -> Card:
-    """更新卡片字段（含状态；只更新传入字段）。"""
+    """更新卡片字段（含状态）。状态迁移矩阵（2.3）：
+    - 四态（积压/待办/进行中/已完成）之间自由迁移，确认语义在前端
+    - 归档是终态：不通过 PATCH 进入/离开，必须走 archive / restore 专用接口
+    """
     card = await session.get(Card, card_id)
     if card is None:
         raise HTTPException(status_code=404, detail="卡片不存在")
@@ -91,9 +94,47 @@ async def update_card(
         _validate_enum(updates["priority"], Priority, "优先级")
     if "status" in updates:
         _validate_enum(updates["status"], CardStatus, "状态")
+        if card.status == CardStatus.ARCHIVED.value:
+            raise HTTPException(status_code=409, detail="已归档卡片需先恢复，才能修改状态")
+        if updates["status"] == CardStatus.ARCHIVED.value:
+            raise HTTPException(status_code=409, detail="归档请使用归档接口（POST /cards/{id}/archive）")
 
     for field, value in updates.items():
         setattr(card, field, value)
     await session.commit()
     await session.refresh(card)
+    return card
+
+
+@router.post("/cards/{card_id}/archive", response_model=CardOut)
+async def archive_card(card_id: int, session: AsyncSession = Depends(get_session)) -> Card:
+    """归档卡片（用户主动触发，终态；进行中卡片不允许归档）。"""
+    card = await session.get(Card, card_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="卡片不存在")
+    if card.status == CardStatus.ARCHIVED.value:
+        raise HTTPException(status_code=409, detail="卡片已归档")
+    if card.status == CardStatus.IN_PROGRESS.value:
+        raise HTTPException(status_code=409, detail="进行中的卡片不能归档，请先移出进行中")
+    card.archived_from = card.status
+    card.status = CardStatus.ARCHIVED.value
+    await session.commit()
+    await session.refresh(card)
+    logger.info("card archived: %s", card_id)
+    return card
+
+
+@router.post("/cards/{card_id}/restore", response_model=CardOut)
+async def restore_card(card_id: int, session: AsyncSession = Depends(get_session)) -> Card:
+    """恢复归档卡片（回到归档前状态，缺省回积压）。"""
+    card = await session.get(Card, card_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="卡片不存在")
+    if card.status != CardStatus.ARCHIVED.value:
+        raise HTTPException(status_code=409, detail="卡片未归档")
+    card.status = card.archived_from or CardStatus.BACKLOG.value
+    card.archived_from = None
+    await session.commit()
+    await session.refresh(card)
+    logger.info("card restored: %s -> %s", card_id, card.status)
     return card

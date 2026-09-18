@@ -46,5 +46,6 @@ class CardOut(BaseModel):
     due_date: date | None
     remark: str | None
     read_only: bool
+    archived_from: str | None
     created_at: datetime
     updated_at: datetime

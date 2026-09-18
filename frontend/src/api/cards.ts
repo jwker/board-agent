@@ -26,6 +26,7 @@ export interface Card {
   due_date: string | null;
   remark: string | null;
   read_only: boolean;
+  archived_from: CardStatus | null;
   created_at: string;
   updated_at: string;
 }
@@ -59,4 +60,12 @@ export function getCard(id: number): Promise<Card> {
 
 export function updateCard(id: number, body: CardPatch): Promise<Card> {
   return api.patch<Card>(`/api/cards/${id}`, body);
+}
+
+export function archiveCard(id: number): Promise<Card> {
+  return api.post<Card>(`/api/cards/${id}/archive`);
+}
+
+export function restoreCard(id: number): Promise<Card> {
+  return api.post<Card>(`/api/cards/${id}/restore`);
 }

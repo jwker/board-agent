@@ -25,6 +25,7 @@ class Card(Base, TimestampMixin):
     due_date: Mapped[date | None] = mapped_column(Date)  # 截止日期
     remark: Mapped[str | None] = mapped_column(Text)  # 备注
     read_only: Mapped[bool] = mapped_column(default=False, nullable=False)  # 只读开关
+    archived_from: Mapped[str | None] = mapped_column(nullable=True)  # 归档前状态（恢复时回原列）
 
     project = relationship("Project", back_populates="cards", lazy="selectin")
     comments = relationship(
