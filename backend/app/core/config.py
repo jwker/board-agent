@@ -1,5 +1,7 @@
 """应用配置：从环境变量 / .env 加载，全项目唯一入口。"""
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +20,9 @@ class Settings(BaseSettings):
 
     # 向量库（Milvus standalone）
     milvus_uri: str = "http://localhost:19531"
+
+    # 产物根目录（默认 ~/.board-agent/artifacts）
+    artifacts_root: str = str(Path.home() / ".board-agent" / "artifacts")
 
     # 模型（阶段 3 接入时填写）
     deepseek_api_key: str | None = None
