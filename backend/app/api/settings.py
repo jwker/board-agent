@@ -18,6 +18,7 @@ from app.schemas.setting import (
     EmailSettingsIn,
     LLMSettingsIn,
     ProjectModelIn,
+    ToolLLMIn,
     VectorSettingsIn,
 )
 from app.services.notice_service import get_prefs, set_prefs
@@ -225,6 +226,23 @@ async def put_vector_settings(
 # ---------- 自动领取（项目级，配置存储；调度在阶段 4 接入） ----------
 
 DEFAULT_AUTO_CLAIM = {"enabled": False, "start_time": "22:00", "end_time": "08:00"}
+
+@router.get("/settings/tool-llm")
+async def get_tool_llm_settings(session: AsyncSession = Depends(get_session)) -> dict:
+    """工具模型：标题提炼等轻任务专用模型配置。"""
+    value = await _get_setting(session, SettingScope.GLOBAL.value, "tool_llm")
+    return {"name": "", "base_url": "", "api_key": "", "model": "", "enable_thinking": None, **value}
+
+
+@router.put("/settings/tool-llm")
+async def put_tool_llm_settings(
+    body: ToolLLMIn, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """保存工具模型配置。"""
+    value = body.model_dump()
+    await _save_setting(session, SettingScope.GLOBAL.value, "tool_llm", value)
+    return value
+
 
 
 @router.get("/projects/{project_id}/settings/auto-claim")

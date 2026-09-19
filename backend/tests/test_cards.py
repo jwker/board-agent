@@ -1,5 +1,7 @@
 """卡片 CRUD API 测试：建卡/列表/详情/更新/校验/入列位置。"""
 
+import asyncio
+
 from app.db.enums import CardStatus, CardType
 from tests.factories import make_project
 
@@ -77,14 +79,51 @@ async def test_create_card_validation(session, client):
 
 
 async def test_create_card_without_title(session, client):
-    """标题可选：留空可创建，标题存为空串（阶段 3 AI 自动总结）。"""
+    """标题可选：留空可创建；未配置模型时用内容前缀兜底。"""
     project = await make_project(session, name="无标题项目")
     await session.commit()
     resp = await client.post(
         f"/api/projects/{project.id}/cards", json={"content": "这是卡片内容，标题应由此总结"}
     )
     assert resp.status_code == 201, resp.text
-    assert resp.json()["title"] == ""
+    assert resp.json()["title"] == "这是卡片内容，标题应由此总结"
+
+
+class _FakeTitleModel:
+    """假模型：返回固定总结标题（避免测试真实调用 LLM）。"""
+
+    async def ainvoke(self, messages):
+        return type("R", (), {"content": "修复登录页按钮错位"})()
+
+
+async def test_create_card_auto_title_with_llm(session, client, monkeypatch):
+    """无标题卡片：创建先返回兜底标题，后台 AI 总结完成后更新（3.1 异步版）。"""
+    import app.api.cards as cards_api
+
+    async def fake_resolve(session, project_id=None, session_ref=None):
+        return _FakeTitleModel()
+
+    monkeypatch.setattr(cards_api, "resolve_tool_chat_model", fake_resolve)
+    project = await make_project(session, name="AI 标题项目")
+    await session.commit()
+    content = "登录页按钮错位，需要修复对齐，这是个很长的需求描述……"
+    resp = await client.post(
+        f"/api/projects/{project.id}/cards",
+        json={"content": content},
+    )
+    assert resp.status_code == 201, resp.text
+    # 1) 创建立即返回：兜底标题（不阻塞在 LLM）
+    assert resp.json()["title"] == "登录页按钮错位，需要修复对齐，这是个很长…"
+    # 2) 后台任务异步精修标题：轮询等待（限 2s），容忍任务调度时序
+    card_id = resp.json()["id"]
+    final_title = ""
+    for _ in range(40):
+        card = (await client.get(f"/api/cards/{card_id}")).json()
+        final_title = card["title"]
+        if final_title == "修复登录页按钮错位":
+            break
+        await asyncio.sleep(0.05)
+    assert final_title == "修复登录页按钮错位"
 
 
 async def test_card_not_found_and_project_not_found(session, client):

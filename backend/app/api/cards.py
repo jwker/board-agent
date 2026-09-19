@@ -2,13 +2,18 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from app.core.config import settings
+from app.core.event_bus import Event, EventType, bus
 from app.db.deps import get_session
 from app.db.enums import CardStatus, CardType, Priority
 from app.db.models import Card, Project
+from app.engine.models import ModelConfigError, resolve_tool_chat_model
+from app.engine.title import fallback_title, summarize_title
 from app.schemas.card import CardCreate, CardOut, CardUpdate
 
 logger = logging.getLogger(__name__)
@@ -35,9 +40,14 @@ async def list_cards(project_id: int, session: AsyncSession = Depends(get_sessio
 async def create_card(
     project_id: int,
     body: CardCreate,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ) -> Card:
-    """新建卡片（内容必填；标题可选，留空由 AI 自动总结，阶段 3 接入）。"""
+    """新建卡片（内容必填；标题可选，留空先用兜底、后台 AI 异步精修标题）。
+
+    异步设计：建卡立即返回（不阻塞在 LLM 上）；后台总结完成后更新标题并
+    通过 WS 推送 card.updated，前端实时刷新。总结失败保留兜底标题。
+    """
     project = await session.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -45,9 +55,10 @@ async def create_card(
     _validate_enum(body.priority, Priority, "优先级")
     _validate_enum(body.status, CardStatus, "状态")
 
+    title = body.title.strip() or fallback_title(body.content)
     card = Card(
         project_id=project_id,
-        title=body.title.strip(),
+        title=title,
         content=body.content,
         card_type=body.card_type,
         custom_tags=body.custom_tags or [],
@@ -61,9 +72,47 @@ async def create_card(
     session.add(card)
     await session.commit()
     await session.refresh(card)
+    if not body.title.strip():
+        # 标题留空：后台 AI 精修（独立会话，不占用请求会话）
+        background_tasks.add_task(refine_title_async, card.id, body.content)
     logger.info("card created: %s (project=%s, status=%s)", card.title, project_id, card.status)
     return card
 
+
+async def refine_title_async(card_id: int, content: str) -> None:
+    """后台任务：全局默认模型轻量总结标题 → 更新卡片 → WS 推送。全程兜底，失败静默。
+
+    用任务级独立引擎（NullPool）而非共享池：后台任务可能运行在任意事件循环，
+    共享池连接跨 loop 复用会抛错，独立引擎+即用即关最稳。
+    """
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            await _refine_title_in_session(card_id, content, session)
+    finally:
+        await engine.dispose()
+
+
+async def _refine_title_in_session(card_id: int, content: str, session: AsyncSession) -> None:
+    """实际精修逻辑（在调用方提供的会话内执行）。"""
+    try:
+        card = await session.get(Card, card_id)
+        if card is None or card.title != fallback_title(content):
+            # 卡片已删或标题已非兜底（用户已改名）→ 不覆盖
+            return
+        model = await resolve_tool_chat_model(session)  # 工具模型：标题提炼走专用轻模型
+        logger.info("card %s title refine using model: %s", card.id, getattr(model, "model_name", "?"))
+        title = await summarize_title(content, model)
+        if not title or title == card.title:
+            return
+        card.title = title
+        await session.commit()
+        await bus.publish(Event(EventType.CARD_UPDATED, {"card_id": card.id, "title": card.title}))
+        logger.info("card %s title refined: %s", card.id, card.title)
+    except ModelConfigError:
+        logger.info("card %s title refine skipped: 未配置默认模型", card_id)
+    except Exception as e:  # noqa: BLE001 - 后台任务绝不抛出
+        logger.warning("card %s title refine failed: %s", card_id, e)
 
 @router.get("/cards/{card_id}", response_model=CardOut)
 async def get_card(card_id: int, session: AsyncSession = Depends(get_session)) -> Card:

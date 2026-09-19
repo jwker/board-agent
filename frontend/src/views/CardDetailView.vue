@@ -7,6 +7,7 @@ import { ArrowLeft, EditPen } from "@element-plus/icons-vue";
 import { getCard, updateCard, type Card } from "@/api/cards";
 import { TYPE_LABELS, typeTagStyle } from "@/constants/card";
 import { getProject, type Project } from "@/api/projects";
+import { onWS } from "@/api/ws";
 import { createComment, listComments, type Comment } from "@/api/comments";
 import { getLLMSettings, type LLMSettings } from "@/api/settings";
 import { useCardsStore } from "@/stores/cards";
@@ -85,7 +86,17 @@ async function reloadData(): Promise<void> {
   }
 }
 
-onBeforeUnmount(() => window.removeEventListener("ws-reconnected", reloadData));
+const offCardUpdated = onWS("card.updated", (msg) => {
+  const { card_id, title } = msg.payload as { card_id?: number; title?: string };
+  if (card_id === Number(props.cardId) && typeof title === "string" && card.value) {
+    card.value = { ...card.value, title };
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("ws-reconnected", reloadData);
+  offCardUpdated();
+});
 
 function changeSessionModel(v: string) {
   sessionModel.value = v;

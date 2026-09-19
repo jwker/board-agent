@@ -6,6 +6,7 @@ import { ArrowDown, ChatDotRound, FolderOpened, Lock, MoreFilled, Plus, Search }
 import { VueDraggable } from "vue-draggable-plus";
 
 import { getProject, type Project } from "@/api/projects";
+import { onWS } from "@/api/ws";
 import { TYPE_LABELS, typeTagStyle } from "@/constants/card";
 import {
   type Card,
@@ -18,7 +19,15 @@ import {
 } from "@/api/cards";
 import { useCardsStore } from "@/stores/cards";
 import { useProjectsStore } from "@/stores/projects";
-import { getAutoClaim, saveAutoClaim, type AutoClaimSettings } from "@/api/settings";
+import {
+  getAutoClaim,
+  saveAutoClaim,
+  getProjectModel,
+  putProjectModel,
+  getLLMSettings,
+  type AutoClaimSettings,
+  type LLMSettings,
+} from "@/api/settings";
 import CardFormDialog from "@/components/CardFormDialog.vue";
 
 const props = defineProps<{ projectId: string }>();
@@ -35,6 +44,18 @@ const createStatus = ref<CardStatus>("backlog");
 const archiveVisible = ref(false);
 const autoClaim = ref<AutoClaimSettings>({ enabled: false, start_time: "22:00", end_time: "08:00" });
 const autoClaimVisible = ref(false);
+const projectModel = ref(""); // "provider_id::request"；空串 = 跟随全局默认
+const llmSettings = ref<LLMSettings | null>(null);
+
+const modelOptions = computed(() => {
+  const opts: { value: string; label: string }[] = [{ value: "", label: "跟随全局默认" }];
+  for (const p of llmSettings.value?.providers ?? []) {
+    for (const m of p.models) {
+      opts.push({ value: `${p.id}::${m.request}`, label: `${p.name} / ${m.display}` });
+    }
+  }
+  return opts;
+});
 
 const COLUMNS: { key: CardStatus; label: string; stripe: string }[] = [
   { key: "backlog", label: "积压", stripe: "#c9cdd4" },
@@ -86,23 +107,47 @@ function onWsReconnected(): void {
   cardsStore.fetchCards(projectId);
 }
 
-onMounted(() => window.addEventListener("ws-reconnected", onWsReconnected));
-onBeforeUnmount(() => window.removeEventListener("ws-reconnected", onWsReconnected));
+// 卡片更新事件（如后台 AI 精修标题）：payload 自带 card_id+title，就地更新标题，避免全量重拉
+const offCardUpdated = onWS("card.updated", (msg) => {
+  const { card_id, title } = msg.payload as { card_id?: number; title?: string };
+  if (card_id && typeof title === "string") {
+    cardsStore.updateTitle(card_id, title);
+  }
+});
 
-async function openAutoClaim(): Promise<void> {
+onMounted(() => window.addEventListener("ws-reconnected", onWsReconnected));
+onBeforeUnmount(() => {
+  window.removeEventListener("ws-reconnected", onWsReconnected);
+  offCardUpdated();
+});
+
+async function openProjectSettings(): Promise<void> {
   try {
     autoClaim.value = await getAutoClaim(projectId);
   } catch {
     /* 保持默认 */
   }
+  try {
+    const pm = await getProjectModel(projectId);
+    projectModel.value = pm.provider_id && pm.model ? `${pm.provider_id}::${pm.model}` : "";
+  } catch {
+    projectModel.value = "";
+  }
+  try {
+    llmSettings.value = await getLLMSettings();
+  } catch {
+    /* 未配置时下拉仅“跟随全局默认” */
+  }
   autoClaimVisible.value = true;
 }
 
-async function saveAutoClaimConfig(): Promise<void> {
+async function saveProjectSettings(): Promise<void> {
   try {
     autoClaim.value = await saveAutoClaim(projectId, autoClaim.value);
+    const [providerId, model] = projectModel.value.split("::");
+    await putProjectModel(projectId, { provider_id: providerId ?? "", model: model ?? "" });
     autoClaimVisible.value = false;
-    ElMessage.success(autoClaim.value.enabled ? "已开启自动领取" : "已关闭自动领取");
+    ElMessage.success("项目设置已保存");
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "保存失败");
   }
@@ -302,9 +347,9 @@ function dueInDays(due: string): string {
         <el-button
           class="auto-claim-btn"
           :class="{ on: autoClaim.enabled }"
-          @click="openAutoClaim()"
+          @click="openProjectSettings()"
         >
-          自动领取{{ autoClaim.enabled ? `（${autoClaim.start_time}-${autoClaim.end_time}）` : "" }}
+          项目设置{{ autoClaim.enabled ? ` · 自动领取 ${autoClaim.start_time}-${autoClaim.end_time}` : "" }}
         </el-button>
         <el-button :icon="FolderOpened" @click="archiveVisible = true">归档区</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate()">新建卡片</el-button>
@@ -422,8 +467,15 @@ function dueInDays(due: string): string {
       </div>
     </el-drawer>
 
-    <el-dialog v-model="autoClaimVisible" title="自动领取设置" width="420px">
+    <el-dialog v-model="autoClaimVisible" title="项目设置" width="460px">
       <el-form label-width="90px" label-position="left">
+        <el-form-item label="默认模型">
+          <el-select v-model="projectModel" placeholder="跟随全局默认" clearable style="width: 100%">
+            <el-option v-for="o in modelOptions" :key="o.value" :label="o.label" :value="o.value" />
+          </el-select>
+          <div class="auto-tip">该项目的 AI 默认使用此模型；留空则跟随全局默认，会话内可再切换</div>
+        </el-form-item>
+        <el-divider />
         <el-form-item label="自动领取">
           <el-switch v-model="autoClaim.enabled" />
           <span class="auto-tip">开启后，AI 会在设置的时间段内自动从「待办」领取任务</span>
@@ -442,7 +494,7 @@ function dueInDays(due: string): string {
       </el-form>
       <template #footer>
         <el-button @click="autoClaimVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveAutoClaimConfig">保存</el-button>
+        <el-button type="primary" @click="saveProjectSettings">保存</el-button>
       </template>
     </el-dialog>
   </div>

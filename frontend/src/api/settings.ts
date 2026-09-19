@@ -102,3 +102,32 @@ export function getAutoClaim(projectId: number): Promise<AutoClaimSettings> {
 export function saveAutoClaim(projectId: number, body: AutoClaimSettings): Promise<AutoClaimSettings> {
   return api.put<AutoClaimSettings>(`/api/projects/${projectId}/settings/auto-claim`, body);
 }
+
+export interface ProjectModelSettings {
+  provider_id: string;
+  model: string;
+}
+
+export function getProjectModel(projectId: number): Promise<ProjectModelSettings> {
+  return api.get<ProjectModelSettings>(`/api/projects/${projectId}/settings/model`);
+}
+
+export function putProjectModel(projectId: number, body: ProjectModelSettings): Promise<ProjectModelSettings> {
+  return api.put<ProjectModelSettings>(`/api/projects/${projectId}/settings/model`, body);
+}
+
+export interface ToolLLMSettings {
+  name: string;
+  base_url: string;
+  api_key: string;
+  model: string;
+  enable_thinking: boolean | null;
+}
+
+export function getToolLLM(): Promise<ToolLLMSettings> {
+  return api.get<ToolLLMSettings>("/api/settings/tool-llm");
+}
+
+export function putToolLLM(body: ToolLLMSettings): Promise<ToolLLMSettings> {
+  return api.put<ToolLLMSettings>("/api/settings/tool-llm", body);
+}

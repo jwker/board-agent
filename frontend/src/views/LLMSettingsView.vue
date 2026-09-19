@@ -4,13 +4,16 @@ import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-import { addLLMProvider, deleteLLMProvider, getLLMSettings, saveLLMSettings, updateLLMProvider, type LLMProvider, type LLMModelItem } from "../api/settings";
+import { addLLMProvider, deleteLLMProvider, getLLMSettings, getToolLLM, putToolLLM, saveLLMSettings, updateLLMProvider, type LLMProvider, type LLMModelItem, type ToolLLMSettings } from "../api/settings";
 
 const router = useRouter();
 
 const providers = ref<LLMProvider[]>([]);
 const defaultModel = ref<{ provider_id: string; model: string } | null>(null);
 const loading = ref(false);
+
+const toolLLM = ref<ToolLLMSettings>({ name: "", base_url: "", api_key: "", model: "", enable_thinking: null });
+const savingTool = ref(false);
 
 const dialogVisible = ref(false);
 const editingId = ref<string | null>(null);
@@ -32,8 +35,25 @@ async function load(): Promise<void> {
     const data = await getLLMSettings();
     providers.value = data.providers;
     defaultModel.value = data.default;
+    try {
+      toolLLM.value = await getToolLLM();
+    } catch {
+      /* 默认空配置 */
+    }
   } finally {
     loading.value = false;
+  }
+}
+
+async function saveToolLLM(): Promise<void> {
+  savingTool.value = true;
+  try {
+    toolLLM.value = await putToolLLM(toolLLM.value);
+    ElMessage.success("工具模型已保存");
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "保存失败");
+  } finally {
+    savingTool.value = false;
   }
 }
 
@@ -154,6 +174,36 @@ function addModelRow(): void {
           </div>
         </div>
       </div>
+    </el-card>
+
+    <el-card shadow="never" class="card">
+      <template #header>
+        <div class="head">
+          <span class="card-title">工具模型</span>
+          <span class="card-sub">标题提炼等轻任务专用，留空则使用全局默认模型</span>
+        </div>
+      </template>
+      <el-form label-width="110px" label-position="left" class="tool-form">
+        <el-form-item label="名称">
+          <el-input v-model="toolLLM.name" placeholder="如：硅基流动（工具）" />
+        </el-form-item>
+        <el-form-item label="Base URL">
+          <el-input v-model="toolLLM.base_url" placeholder="https://api.siliconflow.cn/v1" />
+        </el-form-item>
+        <el-form-item label="API Key">
+          <el-input v-model="toolLLM.api_key" type="password" show-password placeholder="独立于大模型的 API Key" />
+        </el-form-item>
+        <el-form-item label="模型">
+          <el-input v-model="toolLLM.model" placeholder="如：Qwen/Qwen3.5-4B" />
+        </el-form-item>
+        <el-form-item label="关闭思考">
+          <el-switch v-model="toolLLM.enable_thinking" :active-value="false" :inactive-value="true" />
+          <div class="auto-tip">开 = 关闭 thinking（更快，适合标题提炼）；仅部分平台支持（如硅基流动）</div>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="savingTool" @click="saveToolLLM()">保存工具模型</el-button>
+        </el-form-item>
+      </el-form>
     </el-card>
 
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑模型' : '添加模型'" width="480px">
@@ -281,4 +331,6 @@ function addModelRow(): void {
   align-items: center;
   justify-content: center;
 }
+.card-sub { font-size: 12px; color: #909399; }
+.tool-form { max-width: 480px; }
 </style>
