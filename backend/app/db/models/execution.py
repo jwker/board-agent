@@ -17,6 +17,9 @@ class Execution(Base, TimestampMixin):
     thread_id: Mapped[str] = mapped_column(
         nullable=False, index=True
     )  # Deep Agents checkpoint 线程
+    last_comment_id: Mapped[int] = mapped_column(
+        default=0, nullable=False, server_default="0"
+    )  # 已注入上下文的最后一条评论（增量注入游标）
     status: Mapped[str] = mapped_column(nullable=False, index=True)  # ExecutionStatus
     current_step: Mapped[str | None] = mapped_column(Text)  # "步骤 x/y"
     interrupt_payload: Mapped[dict | None] = mapped_column(JSONB)  # 审批挂起载荷

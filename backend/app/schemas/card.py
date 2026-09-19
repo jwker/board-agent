@@ -48,5 +48,6 @@ class CardOut(BaseModel):
     read_only: bool
     archived_from: str | None
     comment_count: int = 0  # 评论数（列表查询时填充；单卡详情不展示）
+    execution_status: str | None = None  # 进行中卡片的 AI 执行状态（ExecutionStatus），无则 None
     created_at: datetime
     updated_at: datetime

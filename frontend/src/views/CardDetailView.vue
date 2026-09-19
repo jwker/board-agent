@@ -2,10 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowLeft, EditPen } from "@element-plus/icons-vue";
+import { ArrowLeft, EditPen, VideoPlay } from "@element-plus/icons-vue";
 
-import { getCard, updateCard, type Card } from "@/api/cards";
-import { TYPE_LABELS, typeTagStyle } from "@/constants/card";
+import { executeCard, getCard, updateCard, type Card } from "@/api/cards";
+import { EXECUTION_LABELS, TYPE_LABELS, executionTagType, typeTagStyle } from "@/constants/card";
 import { getProject, type Project } from "@/api/projects";
 import { onWS } from "@/api/ws";
 import { createComment, listComments, type Comment } from "@/api/comments";
@@ -23,6 +23,20 @@ const comments = ref<Comment[]>([]);
 const newComment = ref("");
 const sending = ref(false);
 const editVisible = ref(false);
+const executing = ref(false);
+
+/** 手动触发 AI 执行：后端仅进行中卡片允许；状态经 WS card.updated 就地更新 */
+async function runExecute() {
+  executing.value = true;
+  try {
+    await executeCard(card.value!.id);
+    ElMessage.success("已触发 AI 执行");
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail ?? "触发失败");
+  } finally {
+    executing.value = false;
+  }
+}
 const llmSettings = ref<LLMSettings>({ providers: [], default: null });
 const sessionModel = ref("");
 
@@ -87,15 +101,31 @@ async function reloadData(): Promise<void> {
 }
 
 const offCardUpdated = onWS("card.updated", (msg) => {
-  const { card_id, title } = msg.payload as { card_id?: number; title?: string };
-  if (card_id === Number(props.cardId) && typeof title === "string" && card.value) {
-    card.value = { ...card.value, title };
+  const { card_id, title, execution_status } = msg.payload as {
+    card_id?: number;
+    title?: string;
+    execution_status?: string;
+  };
+  if (card_id === Number(props.cardId) && card.value) {
+    const patch: Record<string, string> = {};
+    if (typeof title === "string") patch.title = title;
+    if (typeof execution_status === "string") patch.execution_status = execution_status;
+    if (Object.keys(patch).length) card.value = { ...card.value, ...patch };
+  }
+});
+
+// AI 回帖（执行完成等）实时插入评论区：事件只带 card_id/comment_id，重拉列表最可靠
+const offCommentCreated = onWS("comment.created", (msg) => {
+  const { card_id } = msg.payload as { card_id?: number };
+  if (card_id === Number(props.cardId)) {
+    reloadComments().catch(() => {});
   }
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("ws-reconnected", reloadData);
   offCardUpdated();
+  offCommentCreated();
 });
 
 function changeSessionModel(v: string) {
@@ -122,6 +152,11 @@ async function toggleReadOnly() {
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "切换失败");
   }
+}
+
+async function reloadComments() {
+  if (!card.value) return;
+  comments.value = await listComments(card.value.id);
 }
 
 async function sendComment() {
@@ -154,7 +189,10 @@ function goBack() {
 }
 
 function shortThreadId(threadId: string | null): string {
-  return threadId ? threadId.slice(0, 6) : "?";
+  // thread_id 形如 card-12：解析出真实卡片号，避免截断成 card-1
+  if (!threadId) return "?";
+  const m = threadId.match(/^card-(\d+)$/);
+  return m ? m[1] : threadId;
 }
 </script>
 
@@ -183,20 +221,38 @@ function shortThreadId(threadId: string | null): string {
       <el-card shadow="never" class="card-panel">
         <div class="card-head">
           <div class="head-main">
-            <h1 class="title">{{ card.title || "未命名卡片" }}</h1>
+            <div class="title-row">
+              <h1 class="title">{{ card.title || "未命名卡片" }}</h1>
+              <div class="title-actions">
+                <el-button
+                  v-if="card.status === 'in_progress'"
+                  size="small"
+                  :loading="executing"
+                  :icon="VideoPlay"
+                  @click="runExecute"
+                >立即执行</el-button>
+                <el-button size="small" :icon="EditPen" @click="editVisible = true">编辑</el-button>
+              </div>
+            </div>
             <div class="sub">
               创建于 {{ formatTime(card.created_at) }} · 项目：{{ project?.name ?? "-" }} · 当前列：{{ STATUS_LABELS[card.status] }}
             </div>
+            <div class="custom-tags">
+              <el-tag :style="typeTagStyle(card.card_type)" size="small" effect="light">
+                {{ TYPE_LABELS[card.card_type] }}
+              </el-tag>
+              <el-tag v-for="t in card.custom_tags" :key="t" size="small" type="info" effect="light">
+                {{ t }}
+              </el-tag>
+            </div>
+            <el-tag
+              v-if="card.execution_status"
+              class="exec-tag"
+              :type="executionTagType(card.execution_status)"
+              size="small"
+              effect="dark"
+            >{{ EXECUTION_LABELS[card.execution_status] || card.execution_status }}</el-tag>
             <div v-if="card.content" class="card-content">{{ card.content }}</div>
-          </div>
-          <el-tag :style="typeTagStyle(card.card_type)" size="small" effect="light">
-            {{ TYPE_LABELS[card.card_type] }}
-          </el-tag>
-          <el-tag v-for="t in card.custom_tags" :key="t" size="small" type="info" effect="light">
-            {{ t }}
-          </el-tag>
-          <div class="head-actions">
-            <el-button :icon="EditPen" @click="editVisible = true">编辑</el-button>
           </div>
         </div>
       </el-card>
@@ -331,9 +387,35 @@ function shortThreadId(threadId: string | null): string {
   font-size: 13px;
   margin-top: 4px;
 }
-.head-actions {
+.title-row {
   display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.title-row .title {
+  flex: 1;
+  min-width: 0;
+}
+.title-actions {
+  display: flex;
+  align-items: center;
   gap: 8px;
+  flex-shrink: 0;
+}
+.custom-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+/* 执行状态标签统一与上方标签区拉开上边距 */
+.exec-tag {
+  margin-top: 8px;
+}
+/* Element Plus 相邻按钮默认 margin-left: 12px，去掉多余左侧边距 */
+.title-actions .el-button + .el-button {
+  margin-left: 0;
 }
 .detail-grid {
   display: grid;

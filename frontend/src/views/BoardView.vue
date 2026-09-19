@@ -7,7 +7,7 @@ import { VueDraggable } from "vue-draggable-plus";
 
 import { getProject, type Project } from "@/api/projects";
 import { onWS } from "@/api/ws";
-import { TYPE_LABELS, typeTagStyle } from "@/constants/card";
+import { EXECUTION_LABELS, TYPE_LABELS, executionTagType, typeTagStyle } from "@/constants/card";
 import {
   type Card,
   type CardStatus,
@@ -107,11 +107,16 @@ function onWsReconnected(): void {
   cardsStore.fetchCards(projectId);
 }
 
-// 卡片更新事件（如后台 AI 精修标题）：payload 自带 card_id+title，就地更新标题，避免全量重拉
+// 卡片更新事件（标题精修 / AI 执行状态）：payload 自带字段，就地更新，避免全量重拉
 const offCardUpdated = onWS("card.updated", (msg) => {
-  const { card_id, title } = msg.payload as { card_id?: number; title?: string };
-  if (card_id && typeof title === "string") {
-    cardsStore.updateTitle(card_id, title);
+  const { card_id, title, execution_status } = msg.payload as {
+    card_id?: number;
+    title?: string;
+    execution_status?: string;
+  };
+  if (card_id) {
+    if (typeof title === "string") cardsStore.updateTitle(card_id, title);
+    if (typeof execution_status === "string") cardsStore.updateExecutionStatus(card_id, execution_status);
   }
 });
 
@@ -417,6 +422,12 @@ function dueInDays(due: string): string {
               </div>
               <div v-if="card.content" class="card-desc">{{ card.content }}</div>
               <div class="card-meta">
+                <el-tag
+                  v-if="card.status === 'in_progress' && card.execution_status"
+                  :type="executionTagType(card.execution_status)"
+                  size="small"
+                  effect="dark"
+                >{{ EXECUTION_LABELS[card.execution_status] || card.execution_status }}</el-tag>
                 <el-tag :style="typeTagStyle(card.card_type)" size="small" effect="light">
                   {{ TYPE_LABELS[card.card_type] }}
                 </el-tag>
@@ -696,6 +707,11 @@ function dueInDays(due: string): string {
   color: #909399;
   margin-bottom: 8px;
   word-break: break-word;
+  /* 内容截断：最多 3 行，超出省略（完整内容进卡片详情查看） */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 .lock-icon {
   color: #909399;

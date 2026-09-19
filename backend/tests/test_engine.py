@@ -4,7 +4,7 @@ import pytest
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.db.models import Project, Setting
+from app.db.models import Card, Comment, Project, Setting
 from app.engine.agent import build_agent
 from app.engine.models import ModelConfigError, _resolve, resolve_chat_model, resolve_tool_chat_model
 from app.engine.title import fallback_title, summarize_title
@@ -173,3 +173,70 @@ async def test_resolve_tool_model_falls_back_to_global(session):
     await _seed_global(session)
     m = await resolve_tool_chat_model(session)
     assert m.model_name == "a-fast"
+
+
+# ---------- 3.2 简报注入 ----------
+
+
+def test_build_briefing_includes_all_sections():
+    """简报包含：项目介绍 + AGENT.md + 卡片索引；AI 结果取自最后一条 AI 评论。"""
+    from app.engine.prompts import build_briefing
+
+    project = Project(name="测试项目", description="这是一个测试项目", agent_md="## 规范\n不要改公共接口")
+    c1 = Card(
+        id=1, project_id=1, title="任务A", content="内容A",
+        card_type="requirement", priority="medium", status="in_progress",
+    )
+    c1.comments = [
+        Comment(id=1, card_id=1, author="user", content="用户问题"),
+        Comment(id=2, card_id=1, author="ai", content="已完成登录页，待验证"),
+    ]
+    c2 = Card(
+        id=2, project_id=1, title="任务B", content="内容B",
+        card_type="bug", priority="high", status="archived",
+    )
+    briefing = build_briefing(project, [c1, c2])
+    assert "测试项目" in briefing
+    assert "这是一个测试项目" in briefing
+    assert "不要改公共接口" in briefing
+    assert "#1 [in_progress] 任务A：已完成登录页，待验证" in briefing
+    # 归档卡片不进入索引
+    assert "任务B" not in briefing
+
+
+def test_build_briefing_empty_card_result_and_limit():
+    """无 AI 评论 → 结果省略；超上限截断标注。"""
+    from app.engine.prompts import CARD_INDEX_LIMIT, build_briefing
+
+    project = Project(name="P", description=None, agent_md=None)
+    cards = [
+        Card(id=i, project_id=1, title=f"任务{i}", content="x",
+             card_type="requirement", priority="low", status="todo")
+        for i in range(1, CARD_INDEX_LIMIT + 2)
+    ]
+    briefing = build_briefing(project, cards)
+    assert f"#1 [todo] 任务1" in briefing
+    assert "（另有 1 张卡片未列出）" in briefing
+
+
+def test_build_system_prompt_appends_briefing():
+    """build_system_prompt = 基础提示 + 简报。"""
+    from app.engine.agent import BASE_SYSTEM_PROMPT
+    from app.engine.prompts import build_system_prompt
+
+    project = Project(name="P", description="D", agent_md="M")
+    prompt = build_system_prompt(project, [])
+    assert prompt.startswith(BASE_SYSTEM_PROMPT)
+    assert "==== 项目简报 ====" in prompt
+    assert "名称：P" in prompt
+
+
+def test_build_agent_with_briefing_system_prompt():
+    """3.2：带 L1 简报的 system_prompt 可正常构建 agent（简报注入链路通）。"""
+    from app.engine.prompts import build_system_prompt
+
+    model = ChatOpenAI(model="a-fast", api_key="k", base_url="https://x/v1")
+    project = Project(name="P", description="D", agent_md="规范")
+    prompt = build_system_prompt(project, [])
+    agent = build_agent(model, checkpointer=InMemorySaver(), system_prompt=prompt)
+    assert hasattr(agent, "ainvoke")

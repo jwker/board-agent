@@ -53,5 +53,11 @@ export const useCardsStore = defineStore("cards", () => {
     if (idx !== -1) cards.value[idx] = { ...cards.value[idx], title };
   }
 
-  return { cards, loading, error, fetchCards, addCard, editCard, replaceCard, updateTitle };
+  /** 就地更新 AI 执行状态（WS card.updated 推送 execution_status） */
+  function updateExecutionStatus(id: number, execution_status: string) {
+    const idx = cards.value.findIndex((c) => c.id === id);
+    if (idx !== -1) cards.value[idx] = { ...cards.value[idx], execution_status };
+  }
+
+  return { cards, loading, error, fetchCards, addCard, editCard, replaceCard, updateTitle, updateExecutionStatus };
 });

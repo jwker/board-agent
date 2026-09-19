@@ -11,8 +11,9 @@ from app.core.config import settings
 from app.core.event_bus import Event, EventType, bus
 from app.db.deps import get_session
 from app.db.enums import CardStatus, CardType, Priority
-from app.db.models import Card, Project
+from app.db.models import Card, Execution, Project
 from app.engine.models import ModelConfigError, resolve_tool_chat_model
+from app.engine.runner import trigger_execution
 from app.engine.title import fallback_title, summarize_title
 from app.schemas.card import CardCreate, CardOut, CardUpdate
 
@@ -28,12 +29,19 @@ def _validate_enum(value: str, enum_cls: type, field: str) -> None:
 
 @router.get("/projects/{project_id}/cards", response_model=list[CardOut])
 async def list_cards(project_id: int, session: AsyncSession = Depends(get_session)) -> list[CardOut]:
-    """项目内全部卡片（前端按状态分组；含归档）。附带 comment_count。"""
+    """项目内全部卡片（前端按状态分组；含归档）。附带 comment_count + execution_status。"""
     project = await session.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
     stmt = select(Card).where(Card.project_id == project_id).order_by(Card.id.desc())
-    return list((await session.execute(stmt)).scalars().all())
+    cards = list((await session.execute(stmt)).scalars().all())
+    execs = (
+        await session.execute(select(Execution.card_id, Execution.status))
+    ).all()
+    exec_map = {e.card_id: e.status for e in execs}
+    for c in cards:
+        c.execution_status = exec_map.get(c.id)
+    return cards
 
 
 @router.post("/projects/{project_id}/cards", response_model=CardOut, status_code=201)
@@ -119,6 +127,9 @@ async def get_card(card_id: int, session: AsyncSession = Depends(get_session)) -
     card = await session.get(Card, card_id)
     if card is None:
         raise HTTPException(status_code=404, detail="卡片不存在")
+    card.execution_status = (
+        await session.execute(select(Execution.status).where(Execution.card_id == card_id))
+    ).scalar_one_or_none()
     return card
 
 
@@ -148,10 +159,36 @@ async def update_card(
         if updates["status"] == CardStatus.ARCHIVED.value:
             raise HTTPException(status_code=409, detail="归档请使用归档接口（POST /cards/{id}/archive）")
 
+    # 3.3 触发：积压/待办 → 进行中（用户拖入）自动触发 AI 执行；重开（完成→进行中）不触发
+    old_status = card.status
     for field, value in updates.items():
         setattr(card, field, value)
-    await session.commit()
-    await session.refresh(card)
+
+    if (
+        "status" in updates
+        and updates["status"] == CardStatus.IN_PROGRESS.value
+        and old_status in (CardStatus.BACKLOG.value, CardStatus.TODO.value)
+    ):
+        await session.commit()
+        await session.refresh(card)
+        trigger_execution(card.id)
+    else:
+        await session.commit()
+        await session.refresh(card)
+    return card
+
+
+@router.post("/cards/{card_id}/execute", response_model=CardOut)
+async def execute_card_now(
+    card_id: int, session: AsyncSession = Depends(get_session)
+) -> Card:
+    """手动触发 AI 执行（仅进行中卡片；评论触发与拖入触发自动走此逻辑）。"""
+    card = await session.get(Card, card_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="卡片不存在")
+    if card.status != CardStatus.IN_PROGRESS.value:
+        raise HTTPException(status_code=409, detail="仅进行中的卡片可触发 AI 执行")
+    trigger_execution(card.id)
     return card
 
 

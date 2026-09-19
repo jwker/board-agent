@@ -7,8 +7,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_session
-from app.db.enums import CommentAuthor
+from app.db.enums import CardStatus, CommentAuthor
 from app.db.models import Card, Comment
+from app.engine.runner import trigger_execution
 from app.schemas.comment import CommentCreate, CommentOut
 
 logger = logging.getLogger(__name__)
@@ -44,5 +45,10 @@ async def create_comment(
     session.add(comment)
     await session.commit()
     await session.refresh(comment)
+
+    # 3.3 评论触发：进行中的卡片，用户评论 → 触发 AI 执行（AI 评论不经过此接口，不会循环）
+    if card.status == CardStatus.IN_PROGRESS.value:
+        trigger_execution(card_id)
+
     logger.info("comment created: card=%s author=user len=%s", card_id, len(content))
     return comment

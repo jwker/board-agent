@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Setting
+from app.engine.llm_logger import llm_logger
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ def build_chat_model(provider: dict, model_request: str, enable_thinking: bool |
         temperature=0,
         timeout=120,
         max_retries=1,
+        callbacks=[llm_logger],
         **kwargs,
     )
 

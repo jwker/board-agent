@@ -32,3 +32,21 @@ export function typeTagStyle(type: CardType): Record<string, string> {
     "--el-tag-text-color": c,
   };
 }
+
+// 进行中卡片的 AI 执行状态标签（execution_status）
+export const EXECUTION_LABELS: Record<string, string> = {
+  queued: "排队中",
+  running: "AI 处理中",
+  waiting_approval: "等待人工审批",
+  completed: "AI 处理完成",
+  failed: "AI 处理失败",
+  cancelled: "已取消",
+};
+
+export function executionTagType(status: string | null): "info" | "primary" | "warning" | "success" | "danger" {
+  if (status === "running" || status === "queued") return "primary";
+  if (status === "waiting_approval") return "warning";
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "cancelled") return "danger";
+  return "info";
+}

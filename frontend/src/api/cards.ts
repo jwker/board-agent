@@ -28,6 +28,7 @@ export interface Card {
   read_only: boolean;
   archived_from: CardStatus | null;
   comment_count: number;
+  execution_status: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -61,6 +62,11 @@ export function getCard(id: number): Promise<Card> {
 
 export function updateCard(id: number, body: CardPatch): Promise<Card> {
   return api.patch<Card>(`/api/cards/${id}`, body);
+}
+
+/** 手动触发 AI 执行（仅进行中卡片有效，其他状态后端返回 409） */
+export function executeCard(id: number): Promise<Card> {
+  return api.post<Card>(`/api/cards/${id}/execute`);
 }
 
 export function archiveCard(id: number): Promise<Card> {
