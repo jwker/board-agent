@@ -36,11 +36,12 @@ async def list_cards(project_id: int, session: AsyncSession = Depends(get_sessio
     stmt = select(Card).where(Card.project_id == project_id).order_by(Card.id.desc())
     cards = list((await session.execute(stmt)).scalars().all())
     execs = (
-        await session.execute(select(Execution.card_id, Execution.status))
+        await session.execute(select(Execution.card_id, Execution.status, Execution.interrupt_payload))
     ).all()
-    exec_map = {e.card_id: e.status for e in execs}
+    exec_map = {e.card_id: (e.status, e.interrupt_payload) for e in execs}
     for c in cards:
-        c.execution_status = exec_map.get(c.id)
+        c.execution_status = exec_map.get(c.id, (None, None))[0]
+        c.execution_payload = exec_map.get(c.id, (None, None))[1]
     return cards
 
 
@@ -127,9 +128,13 @@ async def get_card(card_id: int, session: AsyncSession = Depends(get_session)) -
     card = await session.get(Card, card_id)
     if card is None:
         raise HTTPException(status_code=404, detail="卡片不存在")
-    card.execution_status = (
-        await session.execute(select(Execution.status).where(Execution.card_id == card_id))
-    ).scalar_one_or_none()
+    exec_row = (
+        await session.execute(
+            select(Execution.status, Execution.interrupt_payload).where(Execution.card_id == card_id)
+        )
+    ).first()
+    card.execution_status = exec_row[0] if exec_row else None
+    card.execution_payload = exec_row[1] if exec_row else None
     return card
 
 

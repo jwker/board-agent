@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { ArrowLeft, EditPen, VideoPlay } from "@element-plus/icons-vue";
 
-import { executeCard, getCard, updateCard, type Card } from "@/api/cards";
+import { approveCard, executeCard, getCard, updateCard, type Card } from "@/api/cards";
 import { EXECUTION_LABELS, TYPE_LABELS, executionTagType, typeTagStyle } from "@/constants/card";
 import { getProject, type Project } from "@/api/projects";
 import { onWS } from "@/api/ws";
@@ -35,6 +35,51 @@ async function runExecute() {
     ElMessage.error(e?.response?.data?.detail ?? "触发失败");
   } finally {
     executing.value = false;
+  }
+}
+
+/** 3.4 审批面板：批准 / 拒绝（原因）/ 编辑命令后执行 */
+const approving = ref(false);
+const editingIndex = ref<number | null>(null);
+const editCommand = ref("");
+
+function startEdit() {
+  const cmd = card.value?.execution_payload?.actions?.[0]?.args?.command;
+  editCommand.value = typeof cmd === "string" ? cmd : "";
+  editingIndex.value = 0;
+}
+
+async function submitApproval(decision: "approve" | "reject" | "edit", rejectMessage = "") {
+  if (!card.value) return;
+  approving.value = true;
+  try {
+    const body: { decision: "approve" | "reject" | "edit"; message?: string; command?: string } = { decision };
+    if (decision === "reject") body.message = rejectMessage.trim();
+    if (decision === "edit") body.command = editCommand.value.trim();
+    await approveCard(card.value.id, body);
+    ElMessage.success(decision === "approve" ? "已批准，AI 继续执行" : decision === "reject" ? "已拒绝，AI 将调整方案" : "已按新命令继续执行");
+    editingIndex.value = null;
+    editCommand.value = "";
+    // 状态经 WS 推送更新；双保险拉一次
+    card.value = await getCard(card.value.id);
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail ?? "审批提交失败");
+  } finally {
+    approving.value = false;
+  }
+}
+
+async function rejectDialog() {
+  try {
+    const { value } = await ElMessageBox.prompt("拒绝原因（可选）", "拒绝执行", {
+      confirmButtonText: "拒绝",
+      cancelButtonText: "取消",
+      inputPlaceholder: "例如：不要动这个文件",
+      inputValidator: () => true,
+    });
+    await submitApproval("reject", value ?? "");
+  } catch {
+    /* 用户取消 */
   }
 }
 const llmSettings = ref<LLMSettings>({ providers: [], default: null });
@@ -252,6 +297,38 @@ function shortThreadId(threadId: string | null): string {
               size="small"
               effect="dark"
             >{{ EXECUTION_LABELS[card.execution_status] || card.execution_status }}</el-tag>
+            <div
+              v-if="card.execution_status === 'waiting_approval' && card.execution_payload"
+              class="approval-panel"
+            >
+              <div class="ap-title">AI 请求执行以下命令，等待审批</div>
+              <div v-for="(a, i) in card.execution_payload.actions" :key="i" class="ap-cmd">
+                <code v-if="editingIndex !== i">{{ (a.args.command as string) ?? "" }}</code>
+                <el-input
+                  v-else
+                  v-model="editCommand"
+                  size="small"
+                  placeholder="输入替代命令"
+                />
+              </div>
+              <div class="ap-actions">
+                <el-button size="small" type="success" :loading="approving" @click="submitApproval('approve')">
+                  批准执行
+                </el-button>
+                <el-button size="small" type="danger" :loading="approving" @click="rejectDialog">
+                  拒绝
+                </el-button>
+                <template v-if="editingIndex === null">
+                  <el-button size="small" @click="startEdit">编辑命令</el-button>
+                </template>
+                <template v-else>
+                  <el-button size="small" type="primary" :loading="approving" @click="submitApproval('edit')">
+                    执行新命令
+                  </el-button>
+                  <el-button size="small" @click="editingIndex = null; editCommand = ''">取消</el-button>
+                </template>
+              </div>
+            </div>
             <div v-if="card.content" class="card-content">{{ card.content }}</div>
           </div>
         </div>
@@ -410,6 +487,39 @@ function shortThreadId(threadId: string | null): string {
   margin-top: 8px;
 }
 /* 执行状态标签统一与上方标签区拉开上边距 */
+.approval-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--el-color-warning-light-7);
+  border-radius: 8px;
+  background: var(--el-color-warning-light-9);
+}
+.ap-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-color-warning-dark-2);
+  margin-bottom: 8px;
+}
+.ap-cmd {
+  margin-bottom: 6px;
+}
+.ap-cmd code {
+  display: block;
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.ap-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
 .exec-tag {
   margin-top: 8px;
 }

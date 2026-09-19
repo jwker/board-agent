@@ -85,18 +85,37 @@ def build_agent(
     checkpointer: Any | None = None,
     tools: list | None = None,
     system_prompt: str = BASE_SYSTEM_PROMPT,
+    backend: Any | None = None,
+    permissions: list | None = None,
+    interrupt_on: dict | None = None,
 ) -> Any:
     """构建单个 Deep Agent 编译图。
 
     - model: 解析后的 chat model 实例（三级配置见 engine/models.py）
     - checkpointer: BaseCheckpointSaver 实例（默认走 create_checkpointer，调用方需先 await）
-    - tools: 阶段 3.3+ 注入卡片工具（读卡/回帖/沙箱等），当前为空
+    - tools: 注入的额外卡片工具；文件/命令工具由 backend 自动注册（tools 为空也可用）
+    - backend: 3.4 沙箱后端（CommandSandboxBackend）；None 时仅对话 + task 子代理
+    - permissions: 文件权限规则（可选，FilesystemPermission 列表）
+    - interrupt_on: 工具审批配置（3.4 起 execute 走白/黑名单 + 其余挂起审批）
     - 返回 CompiledStateGraph；调用 .ainvoke({messages: [...]}, config={"configurable": {"thread_id": ...}})
     """
-    logger.info("building deep agent (model=%s, tools=%d)", getattr(model, "model_name", model), len(tools or []))
+    logger.info(
+        "building deep agent (model=%s, tools=%d, backend=%s)",
+        getattr(model, "model_name", model),
+        len(tools or []),
+        type(backend).__name__ if backend else "none",
+    )
+    kwargs: dict = {}
+    if backend is not None:
+        kwargs["backend"] = backend
+    if permissions:
+        kwargs["permissions"] = permissions
+    if interrupt_on:
+        kwargs["interrupt_on"] = interrupt_on
     return create_deep_agent(
         model=model,
         tools=tools or [],
         system_prompt=system_prompt,
         checkpointer=checkpointer,
+        **kwargs,
     )
