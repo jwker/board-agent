@@ -33,6 +33,7 @@ from app.engine.agent import build_agent, create_checkpointer
 from app.engine.backends import CommandSandboxBackend, build_execute_interrupt_config
 from app.engine.models import ModelConfigError, resolve_chat_model
 from app.engine.prompts import build_system_prompt
+from app.engine.summary import summarize_completion
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +419,65 @@ async def stop_execution(card_id: int) -> bool:
     except Exception:  # noqa: BLE001 - 取消后任务可能带出异常，忽略
         logger.debug("stop_execution %s: task exited with error", card_id)
     return True
+
+
+async def complete_card_summary(card_id: int) -> None:
+    """3.5 收尾：卡片拖到【已完成】时触发。
+
+    注入"仅总结不执行"提示词：即使卡片从未对话过（积压/待办直拖），
+    AI 也只做收尾总结回帖，绝不执行卡片任务、不调用任何工具。
+    """
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            # 1. 若 AI 正在执行：取消任务，状态落 cancelled（不回"已手动停止"，
+            #    收尾总结才是最终回帖，避免误导）
+            task = _running_tasks.get(card_id)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.debug("card %s execution cancelled for completion", card_id)
+                except Exception:  # noqa: BLE001 - 取消后的异常忽略
+                    logger.debug("card %s execution exit with error after cancel", card_id)
+                execution = (
+                    await session.execute(select(Execution).where(Execution.card_id == card_id))
+                ).scalar_one_or_none()
+                if execution is not None and execution.status in (
+                    ExecutionStatus.RUNNING.value,
+                    ExecutionStatus.QUEUED.value,
+                ):
+                    execution.status = ExecutionStatus.CANCELLED.value
+                    execution.interrupt_payload = None
+                    await session.commit()
+                    logger.info("card %s execution cancelled by completion", card_id)
+
+            # 2. 读卡片 + 评论流
+            card = await session.get(Card, card_id)
+            if card is None:
+                return
+            comments = (
+                await session.execute(
+                    select(Comment).where(Comment.card_id == card_id).order_by(Comment.id)
+                )
+            ).scalars().all()
+
+            # 3. 用卡片对话模型生成"仅总结"回帖（项目/全局默认，与执行同一模型，保证总结质量）
+            try:
+                model = await resolve_chat_model(session, project_id=card.project_id)
+            except ModelConfigError:
+                logger.info("card %s completion summary skipped: 未配置默认模型", card_id)
+                return
+            summary = await summarize_completion(card, comments, model)
+            if not summary:
+                return
+            await _post_ai_comment(session, card.id, f"card-{card.id}", summary)
+            logger.info("card %s completion summary posted (%d chars)", card.id, len(summary))
+    except Exception:
+        logger.exception("complete_card_summary %s fatal", card_id)
+    finally:
+        await engine.dispose()
 
 
 async def _mark_stopped(card_id: int, reason: str) -> None:

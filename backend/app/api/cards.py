@@ -1,5 +1,6 @@
 """卡片 API：看板卡片 CRUD（仅用户建卡；状态迁移矩阵在 2.3 收紧）。"""
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -13,7 +14,12 @@ from app.db.deps import get_session
 from app.db.enums import CardStatus, CardType, ExecutionStatus, Priority
 from app.db.models import Card, Execution, Project
 from app.engine.models import ModelConfigError, resolve_tool_chat_model
-from app.engine.runner import _mark_stopped, stop_execution, trigger_execution
+from app.engine.runner import (
+    _mark_stopped,
+    complete_card_summary,
+    stop_execution,
+    trigger_execution,
+)
 from app.engine.title import fallback_title, summarize_title
 from app.schemas.card import CardCreate, CardOut, CardUpdate, ExecuteRequest
 
@@ -165,6 +171,7 @@ async def update_card(
             raise HTTPException(status_code=409, detail="归档请使用归档接口（POST /cards/{id}/archive）")
 
     # 3.3 触发：积压/待办 → 进行中（用户拖入）自动触发 AI 执行；重开（完成→进行中）不触发
+    # 3.5 触发：任意 → 已完成 → 收尾总结（仅总结不执行；运行中的执行先取消）
     old_status = card.status
     for field, value in updates.items():
         setattr(card, field, value)
@@ -177,6 +184,14 @@ async def update_card(
         await session.commit()
         await session.refresh(card)
         trigger_execution(card.id)
+    elif (
+        "status" in updates
+        and updates["status"] == CardStatus.DONE.value
+        and old_status != CardStatus.DONE.value
+    ):
+        await session.commit()
+        await session.refresh(card)
+        asyncio.create_task(complete_card_summary(card.id))
     else:
         await session.commit()
         await session.refresh(card)
