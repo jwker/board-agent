@@ -389,7 +389,9 @@ function shortThreadId(threadId: string | null): string {
     </div>
 
     <template v-if="card">
-      <el-card shadow="never" class="card-panel">
+      <div class="detail-grid">
+        <div class="detail-left">
+          <el-card shadow="never" class="card-panel">
         <div class="card-head">
           <div class="head-main">
             <div class="title-row">
@@ -468,10 +470,9 @@ function shortThreadId(threadId: string | null): string {
             <div v-if="card.content" class="card-content md-body" v-html="renderMarkdown(card.content)"></div>
           </div>
         </div>
-      </el-card>
+          </el-card>
 
-      <div class="detail-grid">
-        <el-card shadow="never" class="panel">
+          <el-card shadow="never" class="panel">
           <template #header>
             <div class="panel-h">讨论（Issue 式回帖）</div>
           </template>
@@ -592,6 +593,7 @@ function shortThreadId(threadId: string | null): string {
             >评论</el-button>
           </div>
         </el-card>
+        </div>
 
         <div class="side">
           <el-card shadow="never" class="panel">
@@ -875,6 +877,12 @@ function shortThreadId(threadId: string | null): string {
 .composer .el-button {
   align-self: flex-end;
 }
+.detail-left {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
 .side {
   display: flex;
   flex-direction: column;
@@ -882,24 +890,30 @@ function shortThreadId(threadId: string | null): string {
 }
 /* PC 端讨论区撑满视口高度：el-card 列布局，评论列表 flex 撑满剩余空间，输入框贴底 */
 @media (min-width: 901px) {
-  .detail-grid > .panel:first-child {
+  .detail-left {
+    height: calc(100vh - 170px);
+  }
+  .detail-left > .card-panel {
+    flex-shrink: 0;
+  }
+  .detail-left > .panel {
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 380px);
-    min-height: 320px;
+    flex: 1;
+    min-height: 0;
   }
-  .detail-grid > .panel:first-child :deep(.el-card__body) {
+  .detail-left > .panel :deep(.el-card__body) {
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
   }
-  .detail-grid > .panel:first-child .issue {
+  .detail-left > .panel .issue {
     flex: 1;
     min-height: 0;
     max-height: none;
   }
-  .detail-grid > .panel:first-child .composer {
+  .detail-left > .panel .composer {
     flex-shrink: 0;
   }
 }
