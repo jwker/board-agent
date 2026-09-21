@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class CommentCreate(BaseModel):
     content: str = Field(min_length=1, max_length=10000)
+    model_ref: str | None = None  # 会话模型引用 "provider_id::model"（详情页临时切换，仅本次触发生效）
 
 
 class CommentOut(BaseModel):

@@ -48,7 +48,7 @@ async def create_comment(
 
     # 3.3 评论触发：进行中的卡片，用户评论 → 触发 AI 执行（AI 评论不经过此接口，不会循环）
     if card.status == CardStatus.IN_PROGRESS.value:
-        trigger_execution(card_id)
+        trigger_execution(card_id, body.model_ref)
 
     logger.info("comment created: card=%s author=user len=%s", card_id, len(content))
     return comment

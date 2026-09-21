@@ -227,7 +227,7 @@ async def test_comment_in_progress_triggers(client, session, monkeypatch):
     await session.commit()
 
     called: list[int] = []
-    monkeypatch.setattr(comments_api, "trigger_execution", lambda cid: called.append(cid))
+    monkeypatch.setattr(comments_api, "trigger_execution", lambda cid, session_ref=None: called.append(cid))
 
     r1 = await client.post(f"/api/cards/{running.id}/comments", json={"content": "补充要求"})
     assert r1.status_code == 201

@@ -18,6 +18,11 @@ class CardCreate(BaseModel):
     read_only: bool = False
 
 
+class ExecuteRequest(BaseModel):
+    """手动触发 AI 执行请求体（可选携带会话模型引用）。"""
+    model_ref: str | None = None
+
+
 class CardUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=200)  # 允许空串（无标题卡片）
     content: str | None = None

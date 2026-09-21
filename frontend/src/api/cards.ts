@@ -69,9 +69,14 @@ export function updateCard(id: number, body: CardPatch): Promise<Card> {
   return api.patch<Card>(`/api/cards/${id}`, body);
 }
 
+/** 停止进行中的 AI 执行（仅 AI 处理中有效） */
+export function stopCard(id: number): Promise<Card> {
+  return api.post<Card>(`/api/cards/${id}/stop`);
+}
+
 /** 手动触发 AI 执行（仅进行中卡片有效，其他状态后端返回 409） */
-export function executeCard(id: number): Promise<Card> {
-  return api.post<Card>(`/api/cards/${id}/execute`);
+export function executeCard(id: number, modelRef?: string): Promise<Card> {
+  return api.post<Card>(`/api/cards/${id}/execute`, modelRef ? { model_ref: modelRef } : {});
 }
 
 export type ApprovalDecision = "approve" | "reject" | "edit";

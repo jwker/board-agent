@@ -10,12 +10,12 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.event_bus import Event, EventType, bus
 from app.db.deps import get_session
-from app.db.enums import CardStatus, CardType, Priority
+from app.db.enums import CardStatus, CardType, ExecutionStatus, Priority
 from app.db.models import Card, Execution, Project
 from app.engine.models import ModelConfigError, resolve_tool_chat_model
-from app.engine.runner import trigger_execution
+from app.engine.runner import _mark_stopped, stop_execution, trigger_execution
 from app.engine.title import fallback_title, summarize_title
-from app.schemas.card import CardCreate, CardOut, CardUpdate
+from app.schemas.card import CardCreate, CardOut, CardUpdate, ExecuteRequest
 
 logger = logging.getLogger(__name__)
 
@@ -185,15 +185,45 @@ async def update_card(
 
 @router.post("/cards/{card_id}/execute", response_model=CardOut)
 async def execute_card_now(
-    card_id: int, session: AsyncSession = Depends(get_session)
+    card_id: int,
+    body: ExecuteRequest | None = None,
+    session: AsyncSession = Depends(get_session),
 ) -> Card:
-    """手动触发 AI 执行（仅进行中卡片；评论触发与拖入触发自动走此逻辑）。"""
+    """手动触发 AI 执行（仅进行中卡片；评论触发与拖入触发自动走此逻辑）。
+
+    body.model_ref: 详情页临时切换的会话模型；空用项目/全局默认。
+    """
     card = await session.get(Card, card_id)
     if card is None:
         raise HTTPException(status_code=404, detail="卡片不存在")
     if card.status != CardStatus.IN_PROGRESS.value:
         raise HTTPException(status_code=409, detail="仅进行中的卡片可触发 AI 执行")
-    trigger_execution(card.id)
+    trigger_execution(card.id, (body.model_ref if body else None))
+    return card
+
+
+@router.post("/cards/{card_id}/stop", response_model=CardOut)
+async def stop_card_execution(
+    card_id: int, session: AsyncSession = Depends(get_session)
+) -> Card:
+    """停止进行中的 AI 执行（AI 处理中可手动停止；仅 running/queued 有效）。"""
+    card = await session.get(Card, card_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="卡片不存在")
+    execution = (
+        await session.execute(select(Execution).where(Execution.card_id == card_id))
+    ).scalar_one_or_none()
+    if execution is None or execution.status not in (
+        ExecutionStatus.RUNNING.value,
+        ExecutionStatus.QUEUED.value,
+    ):
+        raise HTTPException(status_code=409, detail="当前没有运行中的 AI 执行")
+    stopped = await stop_execution(card_id)
+    if not stopped:
+        raise HTTPException(status_code=409, detail="执行已结束，无需停止")
+    await _mark_stopped(card_id, "已手动停止本次执行；如需继续，请重新触发。")
+    await session.refresh(card)
+    logger.info("card execution stopped by user: %s", card_id)
     return card
 
 

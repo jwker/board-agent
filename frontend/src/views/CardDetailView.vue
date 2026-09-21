@@ -2,9 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowLeft, EditPen, VideoPlay } from "@element-plus/icons-vue";
+import { ArrowLeft, EditPen, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 
-import { approveCard, executeCard, getCard, updateCard, type Card } from "@/api/cards";
+import { approveCard, executeCard, getCard, stopCard, updateCard, type Card } from "@/api/cards";
 import { EXECUTION_LABELS, TYPE_LABELS, executionTagType, typeTagStyle } from "@/constants/card";
 import { getProject, type Project } from "@/api/projects";
 import { onWS } from "@/api/ws";
@@ -29,12 +29,27 @@ const executing = ref(false);
 async function runExecute() {
   executing.value = true;
   try {
-    await executeCard(card.value!.id);
+    await executeCard(card.value!.id, sessionModel.value || undefined);
     ElMessage.success("已触发 AI 执行");
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail ?? "触发失败");
   } finally {
     executing.value = false;
+  }
+}
+
+/** 停止进行中的 AI 执行 */
+const stopping = ref(false);
+async function runStop() {
+  if (!card.value) return;
+  stopping.value = true;
+  try {
+    await stopCard(card.value.id);
+    ElMessage.success("已停止执行");
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail ?? "停止失败");
+  } finally {
+    stopping.value = false;
   }
 }
 
@@ -122,11 +137,8 @@ onMounted(async () => {
   }
   try {
     llmSettings.value = await getLLMSettings();
-    // 会话级模型：优先记住上次选择，其次全局默认
-    const saved = localStorage.getItem("session-model");
-    if (saved && modelOptions.value.some((o) => o.value === saved)) {
-      sessionModel.value = saved;
-    } else if (llmSettings.value.default?.provider_id) {
+    // 会话级模型：进入页面默认跟随全局配置；切换仅本次页面临时生效，刷新/退出即恢复
+    if (llmSettings.value.default?.provider_id) {
       sessionModel.value = `${llmSettings.value.default.provider_id}::${llmSettings.value.default.model}`;
     }
   } catch {
@@ -156,6 +168,14 @@ const offCardUpdated = onWS("card.updated", (msg) => {
     if (typeof title === "string") patch.title = title;
     if (typeof execution_status === "string") patch.execution_status = execution_status;
     if (Object.keys(patch).length) card.value = { ...card.value, ...patch };
+    if (execution_status === "waiting_approval") {
+      // WS 不带审批载荷：挂起时重拉卡片，让审批面板拿到 execution_payload
+      getCard(Number(props.cardId))
+        .then((c) => {
+          if (card.value) card.value = c;
+        })
+        .catch(() => {});
+    }
   }
 });
 
@@ -175,9 +195,8 @@ onBeforeUnmount(() => {
 
 function changeSessionModel(v: string) {
   sessionModel.value = v;
-  localStorage.setItem("session-model", v);
   const label = modelOptions.value.find((o) => o.value === v)?.label ?? v;
-  ElMessage.success(`会话模型：${label}`);
+  ElMessage.success(`本次会话使用：${label}（刷新后恢复默认）`);
 }
 
 const sessionLabel = computed(() =>
@@ -209,7 +228,7 @@ async function sendComment() {
   if (!content || !card.value) return;
   sending.value = true;
   try {
-    const created = await createComment(card.value.id, content);
+    const created = await createComment(card.value.id, content, sessionModel.value || undefined);
     comments.value.push(created);
     newComment.value = "";
   } catch (e) {
@@ -253,7 +272,7 @@ function shortThreadId(threadId: string | null): string {
         <el-select
           v-model="sessionModel"
           placeholder="选择会话模型"
-          style="width: 180px"
+          style="width: 280px"
           :disabled="modelOptions.length === 0"
           @change="changeSessionModel"
         >
@@ -270,12 +289,21 @@ function shortThreadId(threadId: string | null): string {
               <h1 class="title">{{ card.title || "未命名卡片" }}</h1>
               <div class="title-actions">
                 <el-button
-                  v-if="card.status === 'in_progress'"
+                  v-if="card.status === 'in_progress' && card.execution_status !== 'running'"
                   size="small"
                   :loading="executing"
                   :icon="VideoPlay"
                   @click="runExecute"
                 >立即执行</el-button>
+                <el-button
+                  v-if="card.status === 'in_progress' && card.execution_status === 'running'"
+                  size="small"
+                  type="danger"
+                  plain
+                  :loading="stopping"
+                  :icon="VideoPause"
+                  @click="runStop"
+                >停止</el-button>
                 <el-button size="small" :icon="EditPen" @click="editVisible = true">编辑</el-button>
               </div>
             </div>

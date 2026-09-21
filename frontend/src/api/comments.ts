@@ -15,6 +15,6 @@ export function listComments(cardId: number): Promise<Comment[]> {
   return api.get<Comment[]>(`/api/cards/${cardId}/comments`);
 }
 
-export function createComment(cardId: number, content: string): Promise<Comment> {
-  return api.post<Comment>(`/api/cards/${cardId}/comments`, { content });
+export function createComment(cardId: number, content: string, modelRef?: string): Promise<Comment> {
+  return api.post<Comment>(`/api/cards/${cardId}/comments`, { content, ...(modelRef ? { model_ref: modelRef } : {}) });
 }

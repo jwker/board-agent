@@ -190,19 +190,26 @@ async def _publish_execution_status(card_id: int, status: str) -> None:
     )
 
 
-async def execute_card(card_id: int) -> None:
-    """后台执行入口：加载 → 组装 → 构建 agent → invoke → AI 回帖。全程兜底不抛出。"""
+async def execute_card(card_id: int, session_ref: str | None = None) -> None:
+    """后台执行入口：加载 → 组装 → 构建 agent → invoke → AI 回帖。全程兜底不抛出。
+
+    session_ref: 卡片详情页临时切换的会话模型（"provider_id::model"）；None 用项目/全局默认。
+    """
     engine = create_async_engine(settings.database_url, poolclass=NullPool)
     try:
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-            await _execute_in_session(card_id, session)
+            await _execute_in_session(card_id, session, session_ref)
+    except asyncio.CancelledError:
+        # 用户停止：取消信号向上传播，状态由 stop_execution → _mark_stopped 落库
+        raise
     except Exception:
         logger.exception("execute_card %s fatal", card_id)
     finally:
         await engine.dispose()
+        _running_tasks.pop(card_id, None)
 
 
-async def _execute_in_session(card_id: int, session: AsyncSession) -> None:
+async def _execute_in_session(card_id: int, session: AsyncSession, session_ref: str | None = None) -> None:
     card = await session.get(Card, card_id)
     if card is None:
         return
@@ -230,12 +237,14 @@ async def _execute_in_session(card_id: int, session: AsyncSession) -> None:
             card_id=card_id,
             thread_id=thread_id_for(card_id),
             status=ExecutionStatus.RUNNING.value,
+            model_ref=session_ref,
         )
         session.add(execution)
     else:
         execution.status = ExecutionStatus.RUNNING.value
         execution.interrupt_payload = None
         execution.current_step = None
+        execution.model_ref = session_ref
     await session.commit()
     await _publish_execution_status(card_id, ExecutionStatus.RUNNING.value)
 
@@ -248,7 +257,10 @@ async def _execute_in_session(card_id: int, session: AsyncSession) -> None:
         execution.last_comment_id = comments[-1].id
 
     try:
-        model = await resolve_chat_model(session, project_id=project.id)
+        model = await resolve_chat_model(session, project_id=project.id, session_ref=execution.model_ref or session_ref)
+        # 关键：立即结束配置读取事务。否则 build_agent → checkpointer.setup()
+        # 的 CREATE INDEX CONCURRENTLY 会等待本事务结束而自锁（并发时互相等死）
+        await session.commit()
     except ModelConfigError as e:
         execution.status = ExecutionStatus.FAILED.value
         await session.commit()
@@ -313,7 +325,11 @@ async def resume_execution(execution_id: int, decisions: list[dict]) -> None:
             card = await session.get(Card, execution.card_id)
             if card is None:
                 return
-            project = await session.get(Project, card.project_id)
+            project = (
+                await session.execute(
+                    select(Project).options(selectinload(Project.cards)).where(Project.id == card.project_id)
+                )
+            ).scalar_one_or_none()
             if project is None:
                 return
             execution.status = ExecutionStatus.RUNNING.value
@@ -321,7 +337,10 @@ async def resume_execution(execution_id: int, decisions: list[dict]) -> None:
             await _publish_execution_status(card.id, ExecutionStatus.RUNNING.value)
 
             try:
-                model = await resolve_chat_model(session, project_id=project.id)
+                model = await resolve_chat_model(session, project_id=project.id, session_ref=execution.model_ref)
+                # 关键：立即结束配置读取事务，避免 checkpointer.setup() 的
+                # CREATE INDEX CONCURRENTLY 等待本事务造成自锁/互锁
+                await session.commit()
             except ModelConfigError as e:
                 execution.status = ExecutionStatus.FAILED.value
                 await session.commit()
@@ -372,6 +391,53 @@ async def resume_execution(execution_id: int, decisions: list[dict]) -> None:
         await engine.dispose()
 
 
-def trigger_execution(card_id: int) -> None:
-    """异步触发执行（不等待；由 API 层调用）。"""
-    asyncio.create_task(execute_card(card_id))
+# 执行任务登记：card_id -> asyncio.Task，供"停止"取消
+_running_tasks: dict[int, asyncio.Task] = {}
+
+
+def trigger_execution(card_id: int, session_ref: str | None = None) -> None:
+    """异步触发执行（不等待；由 API 层调用）。登记任务以便停止。"""
+    task = asyncio.create_task(execute_card(card_id, session_ref))
+    _running_tasks[card_id] = task
+    task.add_done_callback(lambda _t: _running_tasks.pop(card_id, None))
+
+
+async def stop_execution(card_id: int) -> bool:
+    """取消正在运行的执行任务（AI 处理中可停止）。
+
+    返回是否有任务被取消；状态落 cancelled 由调用方（API）执行 _mark_stopped。
+    """
+    task = _running_tasks.get(card_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001 - 取消后任务可能带出异常，忽略
+        logger.debug("stop_execution %s: task exited with error", card_id)
+    return True
+
+
+async def _mark_stopped(card_id: int, reason: str) -> None:
+    """停止后落状态：仅当执行仍处于可取消状态（running/queued）时置 cancelled。"""
+    engine = create_async_engine(settings.database_url, poolclass=NullPool)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            execution = (
+                await session.execute(select(Execution).where(Execution.card_id == card_id))
+            ).scalar_one_or_none()
+            if execution is None or execution.status not in (
+                ExecutionStatus.RUNNING.value,
+                ExecutionStatus.QUEUED.value,
+            ):
+                return
+            execution.status = ExecutionStatus.CANCELLED.value
+            execution.interrupt_payload = None
+            await session.commit()
+            await _post_ai_comment(session, card_id, execution.thread_id, reason)
+            await _publish_execution_status(card_id, ExecutionStatus.CANCELLED.value)
+            logger.info("card %s execution stopped (cancelled)", card_id)
+    finally:
+        await engine.dispose()
