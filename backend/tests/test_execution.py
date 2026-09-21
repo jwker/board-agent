@@ -312,3 +312,90 @@ async def test_execute_card_model_error_marks_failed(session, monkeypatch):
     )
     assert "执行失败" in comments[0].content
     assert "Function call is not supported" in comments[0].content
+
+
+async def test_execute_card_completed_notifies(session, monkeypatch):
+    """3.6：执行完成 → 生成 completed 站内通知（category + 卡片关联）。"""
+    from langchain_openai import ChatOpenAI
+
+    from app.engine import runner
+    from app.services import notice_service
+
+    calls: list[tuple] = []
+
+    async def _stub_model(*a, **k):
+        return ChatOpenAI(model="a-fast", api_key="k", base_url="https://x/v1")
+
+    async def _no_checkpoint():
+        return None
+
+    async def _fake_notify(session, *, category, content, project_id=None, card_id=None, force=False):
+        calls.append((category, content, project_id, card_id))
+        return None
+
+    monkeypatch.setattr(runner, "resolve_chat_model", _stub_model)
+    monkeypatch.setattr(runner, "build_agent", lambda *a, **k: StubAgent())
+    monkeypatch.setattr(runner, "create_checkpointer", _no_checkpoint)
+    monkeypatch.setattr(notice_service, "notify", _fake_notify)
+
+    project = Project(name="P", description="D", agent_md="规范")
+    session.add(project)
+    await session.commit()
+    card = Card(
+        project_id=project.id, title="通知任务", content="实现登录",
+        card_type="requirement", priority="medium", status="in_progress",
+        custom_tags=[],
+    )
+    session.add(card)
+    await session.commit()
+
+    await runner._execute_in_session(card.id, session)
+
+    assert calls, "应调用通知服务"
+    category, content, pid, cid = calls[-1]
+    assert category == "completed"
+    assert pid == project.id
+    assert cid == card.id
+    assert "通知任务" in content
+
+
+async def test_execute_card_failed_notifies(session, monkeypatch):
+    """3.6：执行失败 → 生成 failed 站内通知。"""
+    from langchain_openai import ChatOpenAI
+
+    from app.engine import runner
+    from app.services import notice_service
+
+    calls: list[tuple] = []
+
+    async def _stub_model(*a, **k):
+        return ChatOpenAI(model="a-fast", api_key="k", base_url="https://x/v1")
+
+    async def _no_checkpoint():
+        return None
+
+    async def _fake_notify(session, *, category, content, project_id=None, card_id=None, force=False):
+        calls.append((category, content, project_id, card_id))
+        return None
+
+    monkeypatch.setattr(runner, "resolve_chat_model", _stub_model)
+    monkeypatch.setattr(runner, "build_agent", lambda *a, **k: BoomAgent())
+    monkeypatch.setattr(runner, "create_checkpointer", _no_checkpoint)
+    monkeypatch.setattr(notice_service, "notify", _fake_notify)
+
+    project = Project(name="P", description="D", agent_md="规范")
+    session.add(project)
+    await session.commit()
+    card = Card(
+        project_id=project.id, title="失败卡", content="会失败",
+        card_type="requirement", priority="medium", status="in_progress",
+        custom_tags=[],
+    )
+    session.add(card)
+    await session.commit()
+
+    await runner._execute_in_session(card.id, session)
+
+    assert calls, "应调用通知服务"
+    assert calls[-1][0] == "failed"
+    assert calls[-1][3] == card.id

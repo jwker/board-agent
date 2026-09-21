@@ -34,6 +34,7 @@ from app.engine.backends import CommandSandboxBackend, build_execute_interrupt_c
 from app.engine.models import ModelConfigError, resolve_chat_model
 from app.engine.prompts import build_system_prompt
 from app.engine.summary import summarize_completion
+from app.services import notice_service
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,25 @@ async def _publish_execution_status(card_id: int, status: str) -> None:
     )
 
 
+async def _notify_execution_result(session: AsyncSession, card: Card, category: str) -> None:
+    """执行完成/失败 → 站内通知（completed/failed；按五类勾选过滤）。
+
+    内容简洁：详情在卡片评论里，通知只做提醒 + 可跳转卡片。
+    """
+    title = (card.title or "无标题")[:30]
+    if category == "completed":
+        content = f"卡片「{title}」AI 处理完成"
+    else:
+        content = f"卡片「{title}」AI 处理失败"
+    await notice_service.notify(
+        session,
+        category=category,
+        content=content,
+        project_id=card.project_id,
+        card_id=card.id,
+    )
+
+
 async def execute_card(card_id: int, session_ref: str | None = None) -> None:
     """后台执行入口：加载 → 组装 → 构建 agent → invoke → AI 回帖。全程兜底不抛出。
 
@@ -267,6 +287,7 @@ async def _execute_in_session(card_id: int, session: AsyncSession, session_ref: 
         await session.commit()
         await _post_ai_comment(session, card_id, thread_id_for(card_id), f"执行失败：未配置可用模型（{e}）")
         await _publish_execution_status(card_id, ExecutionStatus.FAILED.value)
+        await _notify_execution_result(session, card, ExecutionStatus.FAILED.value)
         return
 
     try:
@@ -299,6 +320,7 @@ async def _execute_in_session(card_id: int, session: AsyncSession, session_ref: 
         await session.commit()
         await _post_ai_comment(session, card_id, thread_id_for(card_id), f"执行失败：{reason}")
         await _publish_execution_status(card_id, ExecutionStatus.FAILED.value)
+        await _notify_execution_result(session, card, ExecutionStatus.FAILED.value)
         return
     final = _extract_final(result)
 
@@ -307,6 +329,7 @@ async def _execute_in_session(card_id: int, session: AsyncSession, session_ref: 
     await session.commit()
     await _post_ai_comment(session, card_id, thread_id_for(card_id), final)
     await _publish_execution_status(card_id, ExecutionStatus.COMPLETED.value)
+    await _notify_execution_result(session, card, ExecutionStatus.COMPLETED.value)
     logger.info("card %s executed ok, reply=%d chars", card_id, len(final))
 
 
@@ -377,6 +400,7 @@ async def resume_execution(execution_id: int, decisions: list[dict]) -> None:
                 await session.commit()
                 await _post_ai_comment(session, card.id, execution.thread_id, f"执行失败：{reason}")
                 await _publish_execution_status(card.id, ExecutionStatus.FAILED.value)
+                await _notify_execution_result(session, card, ExecutionStatus.FAILED.value)
                 return
 
             final = _extract_final(result)
@@ -385,6 +409,7 @@ async def resume_execution(execution_id: int, decisions: list[dict]) -> None:
             await session.commit()
             await _post_ai_comment(session, card.id, execution.thread_id, final)
             await _publish_execution_status(card.id, ExecutionStatus.COMPLETED.value)
+            await _notify_execution_result(session, card, ExecutionStatus.COMPLETED.value)
             logger.info("card %s resumed ok, reply=%d chars", card.id, len(final))
     except Exception:
         logger.exception("resume_execution %s fatal", execution_id)
