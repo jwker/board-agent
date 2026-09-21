@@ -87,3 +87,53 @@ async def test_summarize_completion_failure_returns_empty():
     """调用失败返回空串，调用方放弃回帖（不影响状态迁移）。"""
     model = _FakeModel(exc=TimeoutError("boom"))
     assert await summarize_completion(_FakeCard(), [], model) == ""
+
+
+@pytest.mark.asyncio
+async def test_complete_card_summary_posts_and_notifies(session, monkeypatch):
+    """3.5+：收尾总结回帖完成后 → completed 站内通知。"""
+    from sqlalchemy import select
+
+    from app.db.models import Card, Comment, Project
+    from app.engine import runner
+    from app.services import notice_service
+
+    calls: list[tuple] = []
+
+    async def _fake_summarize(card, comments, model):
+        return "已完成，无遗留。"
+
+    async def _fake_comment(session, card_id, thread_id, content):
+        pass
+
+    async def _fake_notify(session, *, category, content, project_id=None, card_id=None, force=False):
+        calls.append((category, content, project_id, card_id))
+        return None
+
+    async def _stub_model(*a, **k):
+        return _FakeModel(_FakeResp("ok"))
+
+    monkeypatch.setattr(runner, "resolve_chat_model", _stub_model)
+    monkeypatch.setattr(runner, "summarize_completion", _fake_summarize)
+    monkeypatch.setattr(runner, "_post_ai_comment", _fake_comment)
+    monkeypatch.setattr(notice_service, "notify", _fake_notify)
+
+    project = Project(name="P", description="D", agent_md="规范")
+    session.add(project)
+    await session.commit()
+    card = Card(
+        project_id=project.id, title="收尾通知", content="做点什么",
+        card_type="requirement", priority="medium", status="done",
+        custom_tags=[],
+    )
+    session.add(card)
+    await session.commit()
+
+    await runner.complete_card_summary(card.id)
+
+    assert calls, "收尾总结完成应发通知"
+    category, content, pid, cid = calls[-1]
+    assert category == "completed"
+    assert pid == project.id
+    assert cid == card.id
+    assert "收尾通知" in content

@@ -125,3 +125,53 @@ async def test_approval_no_execution_404(session):
     with pytest.raises(HTTPException) as ei:
         await approve_card_action(99999, body, session)
     assert ei.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_park_for_approval_notifies(session, monkeypatch):
+    """3.6+：审批挂起 → approval_waiting 站内通知。"""
+    from app.engine.runner import _park_for_approval
+    from app.services import notice_service
+
+    calls: list[tuple] = []
+
+    async def _fake_notify(session, *, category, content, project_id=None, card_id=None, force=False):
+        calls.append((category, content, project_id, card_id))
+        return None
+
+    monkeypatch.setattr(notice_service, "notify", _fake_notify)
+
+    project = Project(name="P", description="D", agent_md="规范")
+    session.add(project)
+    await session.commit()
+    card = Card(
+        project_id=project.id, title="审批挂起", content="跑命令",
+        card_type="requirement", priority="medium", status="in_progress",
+        custom_tags=[],
+    )
+    session.add(card)
+    await session.commit()
+    execution = Execution(
+        card_id=card.id, thread_id="card-1", status=ExecutionStatus.RUNNING.value
+    )
+    session.add(execution)
+    await session.commit()
+
+    hitl = {
+        "action_requests": [
+            {
+                "action": {"name": "execute", "args": {"command": "ls -la", "timeout": 5}},
+                "description": "list files",
+                "id": "req-1",
+            }
+        ],
+        "review_configs": [{"action_ids": ["req-1"], "decision_mode": "require_approval"}],
+    }
+    await _park_for_approval(session, execution, hitl, card)
+
+    assert calls, "审批挂起应发通知"
+    category, content, pid, cid = calls[-1]
+    assert category == "approval_waiting"
+    assert pid == project.id
+    assert cid == card.id
+    assert "审批挂起" in content

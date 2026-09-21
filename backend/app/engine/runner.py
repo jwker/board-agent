@@ -103,12 +103,21 @@ async def _park_for_approval(
     session: AsyncSession,
     execution: Execution,
     hitl_request: dict,
+    card: Card,
 ) -> None:
-    """挂起等待审批：持久化载荷、状态置 waiting_approval、WS 推送。"""
+    """挂起等待审批：持久化载荷、状态置 waiting_approval、WS 推送 + 站内通知。"""
     execution.status = ExecutionStatus.WAITING_APPROVAL.value
     execution.interrupt_payload = _hitl_to_payload(hitl_request)
     await session.commit()
     await _publish_execution_status(execution.card_id, ExecutionStatus.WAITING_APPROVAL.value)
+    title = (card.title or "无标题")[:30]
+    await notice_service.notify(
+        session,
+        category="approval_waiting",
+        content=f"卡片「{title}」等待人工审批",
+        project_id=card.project_id,
+        card_id=card.id,
+    )
     actions = execution.interrupt_payload.get("actions", [])
     cmds = [a["args"].get("command", "") for a in actions if a.get("name") == "execute"]
     logger.info(
@@ -307,11 +316,11 @@ async def _execute_in_session(card_id: int, session: AsyncSession, session_ref: 
         hitl = _interrupt_from_result(result)
         if hitl:
             # 命令审批挂起：保存载荷后返回，等待审批 API 恢复
-            await _park_for_approval(session, execution, hitl)
+            await _park_for_approval(session, execution, hitl, card)
             return
     except GraphInterrupt as e:
         # 兼容老版本 langgraph：异常形式的审批挂起
-        await _park_for_approval(session, execution, e.value)
+        await _park_for_approval(session, execution, e.value, card)
         return
     except Exception as e:  # noqa: BLE001 - 模型/引擎异常统一落为 failed，避免卡 running
         reason = f"{type(e).__name__}: {str(e)[:300]}"
@@ -388,10 +397,10 @@ async def resume_execution(execution_id: int, decisions: list[dict]) -> None:
                 )
                 hitl = _interrupt_from_result(result)
                 if hitl:
-                    await _park_for_approval(session, execution, hitl)
+                    await _park_for_approval(session, execution, hitl, card)
                     return
             except GraphInterrupt as e:
-                await _park_for_approval(session, execution, e.value)
+                await _park_for_approval(session, execution, e.value, card)
                 return
             except Exception as e:  # noqa: BLE001
                 reason = f"{type(e).__name__}: {str(e)[:300]}"
@@ -498,6 +507,13 @@ async def complete_card_summary(card_id: int) -> None:
             if not summary:
                 return
             await _post_ai_comment(session, card.id, f"card-{card.id}", summary)
+            await notice_service.notify(
+                session,
+                category="completed",
+                content=f"卡片「{(card.title or '无标题')[:30]}」已完成",
+                project_id=card.project_id,
+                card_id=card.id,
+            )
             logger.info("card %s completion summary posted (%d chars)", card.id, len(summary))
     except Exception:
         logger.exception("complete_card_summary %s fatal", card_id)
