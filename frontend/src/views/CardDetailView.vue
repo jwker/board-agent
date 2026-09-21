@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowLeft, EditPen, VideoPause, VideoPlay } from "@element-plus/icons-vue";
+import { ArrowDown, ArrowLeft, ArrowRight, EditPen, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 
 import { approveCard, executeCard, getCard, stopCard, updateCard, type Card } from "@/api/cards";
 import { EXECUTION_LABELS, TYPE_LABELS, executionTagType, typeTagStyle } from "@/constants/card";
 import { getProject, type Project } from "@/api/projects";
 import { onWS } from "@/api/ws";
-import { createComment, listComments, type Comment } from "@/api/comments";
+import { createComment, listComments, type Comment, type StepItem } from "@/api/comments";
 import { getLLMSettings, type LLMSettings } from "@/api/settings";
 import { useCardsStore } from "@/stores/cards";
 import CardFormDialog from "@/components/CardFormDialog.vue";
+import { renderMarkdown, renderStreamingMarkdown } from "@/utils/markdown";
 
 const props = defineProps<{ projectId: string; cardId: string }>();
 const router = useRouter();
@@ -132,6 +133,7 @@ onMounted(async () => {
     card.value = await getCard(Number(props.cardId));
     project.value = await getProject(Number(props.projectId));
     comments.value = await listComments(card.value.id);
+    scrollIssueToBottom();
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "加载失败");
   }
@@ -145,6 +147,8 @@ onMounted(async () => {
     /* 未配置模型时下拉为空 */
   }
   window.addEventListener("ws-reconnected", reloadData);
+  const issueEl = document.querySelector(".issue") as HTMLElement | null;
+  issueEl?.addEventListener("scroll", onIssueScroll, { passive: true });
 });
 
 async function reloadData(): Promise<void> {
@@ -152,6 +156,7 @@ async function reloadData(): Promise<void> {
   try {
     card.value = await getCard(Number(props.cardId));
     comments.value = await listComments(card.value.id);
+    scrollIssueToBottom();
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "刷新失败");
   }
@@ -170,14 +175,88 @@ const offCardUpdated = onWS("card.updated", (msg) => {
     if (Object.keys(patch).length) card.value = { ...card.value, ...patch };
     if (execution_status === "waiting_approval") {
       // WS 不带审批载荷：挂起时重拉卡片，让审批面板拿到 execution_payload
+      // 流式区保留已输出部分（静态展示），不再追加
+      streamingActive.value = false;
+      streamingWaiting.value = true;
       getCard(Number(props.cardId))
         .then((c) => {
           if (card.value) card.value = c;
         })
         .catch(() => {});
+    } else if (execution_status === "running") {
+      // 新一轮执行（含审批恢复后）：重置文本流式区，开始增量展示；
+      // 步骤保留（跨审批累积，恢复后新步骤继续追加）
+      streamingActive.value = true;
+      streamingWaiting.value = false;
+      streamingText.value = "";
+    } else if (
+      execution_status === "completed" ||
+      execution_status === "failed" ||
+      execution_status === "cancelled"
+    ) {
+      // 执行终态：清理流式区；正式评论（含 steps）经 comment.created 重拉展示
+      streamingActive.value = false;
+      streamingWaiting.value = false;
+      streamingText.value = "";
+      streamingSteps.value = [];
     }
   }
 });
+
+// AI 回复流式增量：逐块追加到评论区"AI 正在输入"占位
+const streamingText = ref("");
+const streamingActive = ref(false);
+const streamingWaiting = ref(false);
+const offCardStream = onWS("card.stream", (msg) => {
+  const { card_id, delta } = msg.payload as { card_id?: number; delta?: string };
+  if (card_id === Number(props.cardId) && typeof delta === "string" && delta) {
+    streamingActive.value = true;
+    streamingWaiting.value = false;
+    streamingText.value += delta;
+    if (!followPaused && issueNearBottom()) scrollIssueToBottom();
+  }
+});
+
+// 工具调用步骤（执行中实时追加；完成/失败/停止后由正式评论的 steps 承接）
+const streamingSteps = ref<StepItem[]>([]);
+const streamingStepsOpen = ref(false); // 流式步骤折叠
+const offCardStep = onWS("card.step", (msg) => {
+  const { card_id, step } = msg.payload as { card_id?: number; step?: StepItem };
+  if (card_id === Number(props.cardId) && step && typeof step.index === "number") {
+    streamingActive.value = true;
+    const arr = [...streamingSteps.value];
+    if (arr[step.index]) arr[step.index] = { ...arr[step.index], ...step };
+    else arr[step.index] = step;
+    streamingSteps.value = arr;
+    if (!followPaused && issueNearBottom()) scrollIssueToBottom();
+  }
+});
+
+// 正式评论内 steps 的展开状态：commentId -> 折叠面板开关；`cid-idx` -> 结果全文开关
+const commentStepsOpen = ref<Record<number, boolean>>({});
+const stepFullOpen = ref<Record<string, boolean>>({});
+
+function toggleCommentSteps(commentId: number) {
+  commentStepsOpen.value = { ...commentStepsOpen.value, [commentId]: !commentStepsOpen.value[commentId] };
+}
+function toggleStepFull(key: string) {
+  stepFullOpen.value = { ...stepFullOpen.value, [key]: !stepFullOpen.value[key] };
+}
+
+/** 参数 JSON 美化 + 截断（过长展示前 200 字） */
+function formatStepArgs(args: unknown): string {
+  if (args === undefined || args === null) return "";
+  let s: string;
+  if (typeof args === "string") s = args;
+  else {
+    try {
+      s = JSON.stringify(args);
+    } catch {
+      s = String(args);
+    }
+  }
+  return s.length > 200 ? s.slice(0, 200) + "…" : s;
+}
 
 // AI 回帖（执行完成等）实时插入评论区：事件只带 card_id/comment_id，重拉列表最可靠
 const offCommentCreated = onWS("comment.created", (msg) => {
@@ -188,8 +267,11 @@ const offCommentCreated = onWS("comment.created", (msg) => {
 });
 
 onBeforeUnmount(() => {
+  const issueEl = document.querySelector(".issue") as HTMLElement | null;
+  issueEl?.removeEventListener("scroll", onIssueScroll);
   window.removeEventListener("ws-reconnected", reloadData);
   offCardUpdated();
+  offCardStream();
   offCommentCreated();
 });
 
@@ -198,10 +280,6 @@ function changeSessionModel(v: string) {
   const label = modelOptions.value.find((o) => o.value === v)?.label ?? v;
   ElMessage.success(`本次会话使用：${label}（刷新后恢复默认）`);
 }
-
-const sessionLabel = computed(() =>
-  card.value ? `会话 #${Math.abs(card.value.id * 7919).toString(16).toUpperCase().slice(0, 4)}` : "",
-);
 
 function formatTime(iso: string): string {
   const d = new Date(iso);
@@ -218,9 +296,37 @@ async function toggleReadOnly() {
   }
 }
 
+// 评论滚动：容器内列表（.issue）。进入/新评论直接滚到底；流式输出时自动跟随。
+// 用户手动滚动（上翻/拖拽等）后暂停跟随，直到滚回底部自动恢复，方便一边输出一边手动查看。
+let followPaused = false;
+let programScroll = false;
+
+function issueNearBottom(): boolean {
+  const el = document.querySelector(".issue") as HTMLElement | null;
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+}
+
+function scrollIssueToBottom(): void {
+  programScroll = true;
+  nextTick(() => {
+    const el = document.querySelector(".issue") as HTMLElement | null;
+    if (el) el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => {
+      programScroll = false;
+    });
+  });
+}
+
+function onIssueScroll(): void {
+  if (programScroll) return; // 程序滚动（自动跟随/初始化）不视为用户干预
+  followPaused = !issueNearBottom(); // 用户滚离底部 → 暂停跟随；滚回底部 → 恢复
+}
+
 async function reloadComments() {
   if (!card.value) return;
   comments.value = await listComments(card.value.id);
+  scrollIssueToBottom();
 }
 
 async function sendComment() {
@@ -231,6 +337,7 @@ async function sendComment() {
     const created = await createComment(card.value.id, content, sessionModel.value || undefined);
     comments.value.push(created);
     newComment.value = "";
+    scrollIssueToBottom();
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "评论失败");
   } finally {
@@ -286,6 +393,7 @@ function shortThreadId(threadId: string | null): string {
         <div class="card-head">
           <div class="head-main">
             <div class="title-row">
+              <span class="thread-badge">对话 #{{ props.cardId }}</span>
               <h1 class="title">{{ card.title || "未命名卡片" }}</h1>
               <div class="title-actions">
                 <el-button
@@ -357,7 +465,7 @@ function shortThreadId(threadId: string | null): string {
                 </template>
               </div>
             </div>
-            <div v-if="card.content" class="card-content">{{ card.content }}</div>
+            <div v-if="card.content" class="card-content md-body" v-html="renderMarkdown(card.content)"></div>
           </div>
         </div>
       </el-card>
@@ -374,18 +482,96 @@ function shortThreadId(threadId: string | null): string {
               </div>
               <div class="i-body">
                 <div class="i-head">
-                  <span class="name">{{ c.author === "ai" ? sessionLabel : "我" }}</span>
+                  <span class="name">{{ c.author === "ai" ? "AI" : "我" }}</span>
                   <el-tag v-if="c.author === 'ai'" size="small" type="warning" effect="plain">
                     AI · 对话 #{{ shortThreadId(c.thread_id) }}
                   </el-tag>
                   <span class="meta">{{ formatTime(c.created_at) }}</span>
                 </div>
-                <div class="i-content">{{ c.content }}</div>
+                <div v-if="c.author === 'ai' && c.steps && c.steps.length" class="steps-block">
+                  <div class="steps-head" @click="toggleCommentSteps(c.id)">
+                    <span class="steps-title">调用过程（{{ c.steps.length }} 步）</span>
+                    <el-icon class="steps-caret"><ArrowDown v-if="commentStepsOpen[c.id]" /><ArrowRight v-else /></el-icon>
+                  </div>
+                  <div v-show="commentStepsOpen[c.id]" class="steps-list">
+                    <div v-for="(s, si) in c.steps" :key="si" class="step-item">
+                      <div class="step-line">
+                        <span class="step-name">{{ s.name || "工具" }}</span>
+                        <span v-if="formatStepArgs(s.args)" class="step-args">{{ formatStepArgs(s.args) }}</span>
+                        <el-tag size="small" :type="s.status === 'done' ? 'success' : 'warning'" effect="plain">
+                          {{ s.status === "done" ? "完成" : "执行中" }}
+                        </el-tag>
+                      </div>
+                      <div v-if="s.result" class="step-result">
+                        <template v-if="stepFullOpen[`${c.id}-${si}`] && s.result_full">
+                          <pre class="step-full">{{ s.result_full }}</pre>
+                        </template>
+                        <template v-else>{{ s.result }}</template>
+                        <span
+                          v-if="s.result_full && s.result_full.length > (s.result || '').length"
+                          class="step-full-toggle"
+                          @click.stop="toggleStepFull(`${c.id}-${si}`)"
+                        >
+                          {{ stepFullOpen[`${c.id}-${si}`] ? "收起" : "查看完整" }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="i-content md-body" v-html="renderMarkdown(c.content)"></div>
+              </div>
+            </div>
+
+            <div
+              v-if="streamingActive || streamingText"
+              class="item streaming-item"
+              :class="{ 'streaming-active': streamingActive }"
+            >
+              <div class="avatar ai">AI</div>
+              <div class="i-body">
+                <div class="i-head">
+                  <span class="name">AI</span>
+                  <el-tag v-if="streamingWaiting" size="small" type="info" effect="plain">
+                    等待人工审批 · 已输出部分
+                  </el-tag>
+                  <span class="meta" v-else>正在输出…</span>
+                </div>
+                <div v-if="streamingSteps.length" class="steps-block">
+                  <div class="steps-head" @click="streamingStepsOpen = !streamingStepsOpen">
+                    <span class="steps-title">调用过程（{{ streamingSteps.length }} 步）</span>
+                    <el-icon class="steps-caret"><ArrowDown v-if="streamingStepsOpen" /><ArrowRight v-else /></el-icon>
+                  </div>
+                  <div v-show="streamingStepsOpen" class="steps-list">
+                    <div v-for="s in streamingSteps" :key="s.index" class="step-item">
+                      <div class="step-line">
+                        <span class="step-name">{{ s.name || "工具" }}</span>
+                        <span v-if="formatStepArgs(s.args)" class="step-args">{{ formatStepArgs(s.args) }}</span>
+                        <el-tag size="small" :type="s.status === 'done' ? 'success' : 'warning'" effect="plain">
+                          {{ s.status === "done" ? "完成" : "执行中" }}
+                        </el-tag>
+                      </div>
+                      <div v-if="s.result" class="step-result">
+                        <template v-if="stepFullOpen[`s-${s.index}`] && s.result_full">
+                          <pre class="step-full">{{ s.result_full }}</pre>
+                        </template>
+                        <template v-else>{{ s.result }}</template>
+                        <span
+                          v-if="s.result_full && s.result_full.length > (s.result || '').length"
+                          class="step-full-toggle"
+                          @click.stop="toggleStepFull(`s-${s.index}`)"
+                        >
+                          {{ stepFullOpen[`s-${s.index}`] ? "收起" : "查看完整" }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="i-content md-body streaming-body" v-html="renderStreamingMarkdown(streamingText)"></div>
               </div>
             </div>
 
             <el-empty
-              v-if="comments.length === 0"
+              v-if="comments.length === 0 && !streamingActive && !streamingText"
               :image-size="60"
               description="还没有评论，留下第一条吧"
             />
@@ -482,7 +668,6 @@ function shortThreadId(threadId: string | null): string {
   color: #303133;
   font-size: 14px;
   line-height: 1.7;
-  white-space: pre-wrap;
   word-break: break-word;
   max-height: 320px;
   overflow-y: auto;
@@ -501,6 +686,16 @@ function shortThreadId(threadId: string | null): string {
 .title-row .title {
   flex: 1;
   min-width: 0;
+}
+.thread-badge {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #909399;
+  background: #f4f4f5;
+  border-radius: 6px;
+  padding: 3px 9px;
+  line-height: 1.4;
 }
 .title-actions {
   display: flex;
@@ -644,8 +839,27 @@ function shortThreadId(threadId: string | null): string {
   font-size: 14px;
   line-height: 1.65;
   color: #4e5969;
-  white-space: pre-wrap;
   word-break: break-word;
+}
+.streaming-body {
+  border-left: 2px solid #c8a6f5;
+  padding-left: 8px;
+  min-height: 1.2em;
+}
+.streaming-body:empty::before {
+  content: "…";
+  color: #909399;
+}
+.streaming-item.streaming-active .streaming-body::after {
+  content: "▍";
+  margin-left: 2px;
+  color: #7b3fe4;
+  animation: streaming-blink 1s step-start infinite;
+}
+@keyframes streaming-blink {
+  50% {
+    opacity: 0;
+  }
 }
 .composer {
   display: flex;
@@ -666,4 +880,229 @@ function shortThreadId(threadId: string | null): string {
   flex-direction: column;
   gap: 16px;
 }
+/* PC 端讨论区撑满视口高度：el-card 列布局，评论列表 flex 撑满剩余空间，输入框贴底 */
+@media (min-width: 901px) {
+  .detail-grid > .panel:first-child {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 380px);
+    min-height: 320px;
+  }
+  .detail-grid > .panel:first-child :deep(.el-card__body) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .detail-grid > .panel:first-child .issue {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+  }
+  .detail-grid > .panel:first-child .composer {
+    flex-shrink: 0;
+  }
+}
+</style>
+
+<style>
+/* Markdown 渲染样式（v-html 内容不参与 scoped，用非 scoped 块；卡片主体与评论共用） */
+.md-body {
+  word-break: break-word;
+  line-height: 1.7;
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+.md-body p {
+  margin: 6px 0;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  margin: 14px 0 8px;
+  font-weight: 700;
+  color: #303133;
+  line-height: 1.4;
+}
+.md-body h1 {
+  font-size: 20px;
+}
+.md-body h2 {
+  font-size: 18px;
+}
+.md-body h3 {
+  font-size: 16px;
+}
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  font-size: 15px;
+}
+.md-body ul,
+.md-body ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+.md-body li {
+  margin: 3px 0;
+}
+.md-body code {
+  background: #f5f7fa;
+  border: 1px solid #ebeef5;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 12.5px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  color: #c7254e;
+}
+.md-body pre {
+  background: #f7f8fa;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.md-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-size: 13px;
+}
+.md-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid #409eff;
+  color: #606266;
+  background: #f8fbff;
+}
+.md-body table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid #e4e7ed;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.md-body th {
+  background: #f5f7fa;
+  font-weight: 600;
+}
+.md-body a {
+  color: #409eff;
+  text-decoration: none;
+}
+.md-body a:hover {
+  text-decoration: underline;
+}
+.md-body img {
+  max-width: 100%;
+  border-radius: 4px;
+}
+.md-body hr {
+  border: none;
+  border-top: 1px solid #e4e7ed;
+  margin: 12px 0;
+}
+.md-body input[type="checkbox"] {
+  margin-right: 6px;
+}
+
+/* 调用过程折叠块（正式评论 + 流式区共用） */
+.steps-block {
+  margin: 8px 0 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--el-fill-color-lighter);
+}
+.steps-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.steps-head:hover {
+  background: var(--el-fill-color);
+}
+.steps-title {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  font-weight: 500;
+}
+.steps-caret {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.steps-list {
+  border-top: 1px dashed var(--el-border-color-lighter);
+  padding: 6px 10px;
+  max-height: 360px;
+  overflow: auto;
+}
+.step-item {
+  padding: 4px 0;
+}
+.step-item + .step-item {
+  border-top: 1px solid var(--el-border-color-extra-light);
+}
+.step-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.step-name {
+  font-family: var(--el-font-family-mono, monospace);
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+.step-args {
+  color: var(--el-text-color-secondary);
+  font-family: var(--el-font-family-mono, monospace);
+  word-break: break-all;
+}
+.step-result {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.step-full {
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  font-size: 12px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.step-full-toggle {
+  color: var(--el-color-primary);
+  cursor: pointer;
+  margin-left: 6px;
+  font-size: 12px;
+}
+.step-full-toggle:hover {
+  text-decoration: underline;
+}
+
 </style>

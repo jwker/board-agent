@@ -15,6 +15,7 @@
 """
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -40,6 +41,98 @@ logger = logging.getLogger(__name__)
 
 # AI 评论内容上限（防止超长回复撑爆评论）
 AI_COMMENT_MAX = 4000
+
+# 流式缓冲：card_id -> 本次执行已流式输出的累积文本。
+# 供"停止 / 失败"时保留已输出部分（前端流式区刷新后仍可回显在落库评论中）。
+_stream_buffers: dict[int, str] = {}
+_steps_buffers: dict[int, list[dict]] = {}
+# tool_call_id -> {name, args_accum, parsed, step_index}（流式增量拼参数用）
+_tool_calls_accum: dict[int, dict[str, dict]] = {}
+
+# 单步结果完整内容上限 / 摘要长度（超长截断，前端可展开看完整）
+STEP_RESULT_FULL_MAX = 50_000
+STEP_RESULT_SUMMARY_MAX = 500
+
+
+def _stream_buffer_pop(card_id: int) -> str:
+    return _stream_buffers.pop(card_id, "")
+
+
+def _steps_buffer_pop(card_id: int) -> list[dict]:
+    """取走某卡片的工具步骤缓冲（完成/失败/停止落评论时调用一次）。"""
+    _tool_calls_accum.pop(card_id, None)
+    return _steps_buffers.pop(card_id, [])
+
+
+def _try_json(text: str):
+    """尝试解析 JSON 字符串，失败返回 None（工具参数增量未拼完）。"""
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return None
+
+
+def _ingest_step_chunk(card_id: int, chunk, meta: dict) -> list[dict]:
+    """从 messages 流解析工具调用/结果消息，累积步骤并返回待发布事件。
+
+    - AIMessageChunk.tool_call_chunks：模型发起工具调用（增量拼参数）→ calling 步骤
+    - ToolMessageChunk：工具返回 → 补结果并转 done
+    返回 [(step, index)]，step 含 {name, args, status, result, result_full}。
+    """
+    from langchain_core.messages import ToolMessage, ToolMessageChunk
+
+    events: list[dict] = []
+    tc_chunks = getattr(chunk, "tool_call_chunks", None)
+    if tc_chunks:
+        acc = _tool_calls_accum.setdefault(card_id, {})
+        for tcc in tc_chunks:
+            tid = tcc.get("id")
+            if not tid:
+                continue
+            entry = acc.get(tid)
+            if entry is None:
+                entry = {"name": tcc.get("name") or "", "args_accum": tcc.get("args") or "", "parsed": False}
+                acc[tid] = entry
+            else:
+                if tcc.get("name"):
+                    entry["name"] = tcc["name"]
+                entry["args_accum"] += tcc.get("args") or ""
+            if not entry["parsed"]:
+                args = _try_json(entry["args_accum"])
+                if args is not None:
+                    entry["parsed"] = True
+                    steps = _steps_buffers.setdefault(card_id, [])
+                    step = {
+                        "name": entry["name"] or "tool",
+                        "args": args,
+                        "status": "calling",
+                        "result": "",
+                        "result_full": "",
+                    }
+                    entry["step_index"] = len(steps)
+                    steps.append(step)
+                    events.append((card_id, dict(step, index=len(steps) - 1)))
+    if isinstance(chunk, (ToolMessageChunk, ToolMessage)):
+        tid = getattr(chunk, "tool_call_id", None)
+        name = getattr(chunk, "name", None) or ""
+        content = getattr(chunk, "content", "") or ""
+        entry = (_tool_calls_accum.get(card_id) or {}).get(tid) if tid else None
+        if entry:
+            idx = entry.get("step_index")
+            steps = _steps_buffers.get(card_id, [])
+            if idx is not None and idx < len(steps):
+                step = steps[idx]
+                step["status"] = "done"
+                if name:
+                    step["name"] = name
+                step["result"] = (
+                    content[:STEP_RESULT_SUMMARY_MAX] + "…"
+                    if len(content) > STEP_RESULT_SUMMARY_MAX
+                    else content
+                )
+                step["result_full"] = content[:STEP_RESULT_FULL_MAX]
+                events.append((card_id, dict(step, index=idx)))
+    return events
 
 
 def thread_id_for(card_id: int) -> str:
@@ -75,6 +168,59 @@ def _interrupt_from_result(result: dict) -> dict | None:
     first = intr[0] if isinstance(intr, list) else intr
     value = getattr(first, "value", first)
     return value if isinstance(value, dict) else None
+
+
+def _interrupt_from_state(state: dict) -> dict | None:
+    """从 astream values 流的最新状态提取中断载荷（__interrupt__ 键）。
+
+    langgraph 中断键形态不固定（list / tuple / 单个 Interrupt 对象），统一解包。
+    """
+    intr = state.get("__interrupt__")
+    if not intr:
+        return None
+    first = intr[0] if isinstance(intr, (list, tuple)) else intr
+    value = getattr(first, "value", first)
+    return value if isinstance(value, dict) else None
+
+
+async def _stream_agent(agent, input_obj, config, card_id: int | None = None):
+    """流式执行 agent：token 增量经 WS 推送；返回 (final_state, hitl_request|None)。
+
+    - 真实 Deep Agents：astream 双模式 —— messages 拿模型文本增量（node=model）并推送
+      CARD_STREAM 事件；values 拿最终完整状态与 __interrupt__（审批挂起）。
+    - 无 astream（测试桩）：回退 ainvoke，中断仍从结果 __interrupt__ 读取。
+    """
+    if not hasattr(agent, "astream"):
+        result = await agent.ainvoke(input_obj, config)
+        return result, _interrupt_from_result(result)
+    final_state = None
+    hitl = None
+    async for mode, data in agent.astream(
+        input_obj, config, stream_mode=["messages", "values"]
+    ):
+        if mode == "messages":
+            chunk, meta = data
+            if card_id is not None:
+                for _cid, step in _ingest_step_chunk(card_id, chunk, meta):
+                    await bus.publish(
+                        Event(EventType.CARD_STEP, {"card_id": card_id, "step": step})
+                    )
+            text = getattr(chunk, "content", "")
+            if text and isinstance(text, str) and meta.get("langgraph_node") == "model":
+                if card_id is not None:
+                    _stream_buffers[card_id] = _stream_buffers.get(card_id, "") + text
+                    logger.debug(
+                        "card %s stream delta=%d total=%d", card_id, len(text), len(_stream_buffers[card_id])
+                    )
+                    await bus.publish(
+                        Event(EventType.CARD_STREAM, {"card_id": card_id, "delta": text})
+                    )
+        elif mode == "values":
+            final_state = data
+            intr = _interrupt_from_state(data)
+            if intr:
+                hitl = intr
+    return final_state, hitl
 
 
 def _hitl_to_payload(hitl_request: dict) -> dict:
@@ -179,14 +325,15 @@ def _extract_final(result: dict) -> str:
 
 
 async def _post_ai_comment(
-    session: AsyncSession, card_id: int, thread_id: str, content: str
+    session: AsyncSession, card_id: int, thread_id: str, content: str, steps: list | None = None
 ) -> None:
-    """AI 结果以评论回帖（author=ai，thread_id 标识会话）。"""
+    """AI 结果以评论回帖（author=ai，thread_id 标识会话；steps 为工具调用步骤）。"""
     comment = Comment(
         card_id=card_id,
         author=CommentAuthor.AI.value,
         thread_id=thread_id,
         content=content[:AI_COMMENT_MAX],
+        steps=steps or None,
     )
     session.add(comment)
     await session.commit()
@@ -309,34 +456,47 @@ async def _execute_in_session(card_id: int, session: AsyncSession, session_ref: 
             backend=sandbox,
             interrupt_on=interrupt_on,
         )
-        result = await agent.ainvoke(
+        # 流式执行：token 增量经 WS 推送，最终状态/中断从 values 流收集
+        _stream_buffers.pop(card_id, None)
+        _steps_buffers.pop(card_id, None)
+        result, hitl = await _stream_agent(
+            agent,
             {"messages": [{"role": "user", "content": instruction}]},
-            config=_thread_config(thread_id_for(card_id)),
+            _thread_config(thread_id_for(card_id)),
+            card_id,
         )
-        hitl = _interrupt_from_result(result)
         if hitl:
             # 命令审批挂起：保存载荷后返回，等待审批 API 恢复
+            _stream_buffers.pop(card_id, None)
             await _park_for_approval(session, execution, hitl, card)
             return
     except GraphInterrupt as e:
         # 兼容老版本 langgraph：异常形式的审批挂起
+        _stream_buffers.pop(card_id, None)
         await _park_for_approval(session, execution, e.value, card)
         return
     except Exception as e:  # noqa: BLE001 - 模型/引擎异常统一落为 failed，避免卡 running
         reason = f"{type(e).__name__}: {str(e)[:300]}"
         logger.error("card %s execution failed: %s", card_id, reason)
+        streamed = _stream_buffer_pop(card_id)
+        prefix = f"（AI 输出中断：执行失败）\n\n{streamed}\n\n---\n" if streamed.strip() else ""
         execution.status = ExecutionStatus.FAILED.value
         await session.commit()
-        await _post_ai_comment(session, card_id, thread_id_for(card_id), f"执行失败：{reason}")
+        await _post_ai_comment(
+            session, card_id, thread_id_for(card_id), f"{prefix}执行失败：{reason}", steps=_steps_buffer_pop(card_id)
+        )
         await _publish_execution_status(card_id, ExecutionStatus.FAILED.value)
         await _notify_execution_result(session, card, ExecutionStatus.FAILED.value)
         return
-    final = _extract_final(result)
+    final = _extract_final(result) if result else "（执行完成，无输出）"
+    _stream_buffer_pop(card_id)
 
     execution.status = ExecutionStatus.COMPLETED.value
     execution.interrupt_payload = None
     await session.commit()
-    await _post_ai_comment(session, card_id, thread_id_for(card_id), final)
+    await _post_ai_comment(
+        session, card_id, thread_id_for(card_id), final, steps=_steps_buffer_pop(card_id)
+    )
     await _publish_execution_status(card_id, ExecutionStatus.COMPLETED.value)
     await _notify_execution_result(session, card, ExecutionStatus.COMPLETED.value)
     logger.info("card %s executed ok, reply=%d chars", card_id, len(final))
@@ -391,32 +551,48 @@ async def resume_execution(execution_id: int, decisions: list[dict]) -> None:
                     backend=sandbox,
                     interrupt_on=interrupt_on,
                 )
-                result = await agent.ainvoke(
+                # 流式执行：token 增量经 WS 推送；values 收集最终状态与再挂起
+                _stream_buffers.pop(card.id, None)  # 步骤缓冲保留：跨审批继续累积
+                result, hitl = await _stream_agent(
+                    agent,
                     Command(resume={"decisions": decisions}),
-                    config=_thread_config(execution.thread_id),
+                    _thread_config(execution.thread_id),
+                    card.id,
                 )
-                hitl = _interrupt_from_result(result)
                 if hitl:
+                    _stream_buffers.pop(card.id, None)
                     await _park_for_approval(session, execution, hitl, card)
                     return
             except GraphInterrupt as e:
+                _stream_buffers.pop(card.id, None)
                 await _park_for_approval(session, execution, e.value, card)
                 return
             except Exception as e:  # noqa: BLE001
                 reason = f"{type(e).__name__}: {str(e)[:300]}"
                 logger.error("card %s resume failed: %s", card.id, reason)
+                streamed = _stream_buffer_pop(card.id)
+                prefix = f"（AI 输出中断：执行失败）\n\n{streamed}\n\n---\n" if streamed.strip() else ""
                 execution.status = ExecutionStatus.FAILED.value
                 await session.commit()
-                await _post_ai_comment(session, card.id, execution.thread_id, f"执行失败：{reason}")
+                await _post_ai_comment(
+                    session,
+                    card.id,
+                    execution.thread_id,
+                    f"{prefix}执行失败：{reason}",
+                    steps=_steps_buffer_pop(card.id),
+                )
                 await _publish_execution_status(card.id, ExecutionStatus.FAILED.value)
                 await _notify_execution_result(session, card, ExecutionStatus.FAILED.value)
                 return
 
-            final = _extract_final(result)
+            final = _extract_final(result) if result else "（执行完成，无输出）"
+            _stream_buffer_pop(card.id)
             execution.status = ExecutionStatus.COMPLETED.value
             execution.interrupt_payload = None
             await session.commit()
-            await _post_ai_comment(session, card.id, execution.thread_id, final)
+            await _post_ai_comment(
+                session, card.id, execution.thread_id, final, steps=_steps_buffer_pop(card.id)
+            )
             await _publish_execution_status(card.id, ExecutionStatus.COMPLETED.value)
             await _notify_execution_result(session, card, ExecutionStatus.COMPLETED.value)
             logger.info("card %s resumed ok, reply=%d chars", card.id, len(final))
@@ -536,8 +712,14 @@ async def _mark_stopped(card_id: int, reason: str) -> None:
                 return
             execution.status = ExecutionStatus.CANCELLED.value
             execution.interrupt_payload = None
+            streamed = _stream_buffer_pop(card_id)
+            content = reason
+            if streamed and streamed.strip():
+                content = f"{reason}\n\n（AI 已输出部分）\n\n{streamed}"
             await session.commit()
-            await _post_ai_comment(session, card_id, execution.thread_id, reason)
+            await _post_ai_comment(
+                session, card_id, execution.thread_id, content, steps=_steps_buffer_pop(card_id)
+            )
             await _publish_execution_status(card_id, ExecutionStatus.CANCELLED.value)
             logger.info("card %s execution stopped (cancelled)", card_id)
     finally:

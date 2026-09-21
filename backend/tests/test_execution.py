@@ -15,6 +15,10 @@ class StubAgent:
     async def ainvoke(self, messages, config=None):
         return {"messages": [AIMessage(content="已完成任务，测试通过")]}
 
+    async def astream(self, input, config=None, stream_mode=None):
+        # 模拟流式：单次 values 输出完整状态（走真实 _stream_agent 路径）
+        yield "values", {"messages": [AIMessage(content="已完成任务，测试通过")]}
+
 
 # ---------- 上下文组装 ----------
 
@@ -282,6 +286,11 @@ async def test_execute_card_model_error_marks_failed(session, monkeypatch):
         async def ainvoke(self, messages, config=None):
             raise RuntimeError("Function call is not supported for this model")
 
+        async def astream(self, input, config=None, stream_mode=None):
+            if False:  # 保持 async generator 形态
+                yield None
+            raise RuntimeError("Function call is not supported for this model")
+
     async def _no_checkpoint():
         return None
 
@@ -399,3 +408,144 @@ async def test_execute_card_failed_notifies(session, monkeypatch):
     assert calls, "应调用通知服务"
     assert calls[-1][0] == "failed"
     assert calls[-1][3] == card.id
+
+
+# ---------- 流式输出 ----------
+
+
+async def test_stream_agent_pushes_delta_and_collects_state():
+    """_stream_agent：model 节点文本块经 CARD_STREAM 推送；values 收集最终状态与中断。"""
+    from langchain_core.messages import AIMessageChunk
+    from app.core.event_bus import EventType
+
+    class FakeStreamAgent:
+        async def astream(self, input, config=None, stream_mode=None):
+            # messages：两个 model 节点文本块
+            yield "messages", (AIMessageChunk(content="你好"), {"langgraph_node": "model"})
+            yield "messages", (AIMessageChunk(content="世界"), {"langgraph_node": "model"})
+            # 非 model 节点文本块：不推送
+            yield "messages", (AIMessageChunk(content="子代理输出"), {"langgraph_node": "agent"})
+            # values：最终状态
+            yield "values", {"messages": [AIMessage(content="你好世界")]}
+
+    deltas: list[str] = []
+    received = []
+
+    def on_stream(event):
+        deltas.append(event.payload["delta"])
+
+    from app.engine import runner
+    unsub = runner.bus.subscribe(EventType.CARD_STREAM, on_stream)
+    try:
+        final_state, hitl = await runner._stream_agent(
+            FakeStreamAgent(), {"messages": []}, {"configurable": {"thread_id": "t"}}, card_id=99
+        )
+    finally:
+        unsub()
+
+    assert deltas == ["你好", "世界"], deltas
+    assert hitl is None
+    assert runner._stream_buffers.pop(99, "") == "你好世界"
+
+
+async def test_stream_agent_captures_interrupt():
+    """values 流的 __interrupt__（tuple 形态）能被 _stream_agent 捕获。"""
+    from langchain_core.messages import AIMessageChunk
+
+    class FakeInterruptAgent:
+        async def astream(self, input, config=None, stream_mode=None):
+            yield "messages", (AIMessageChunk(content="我先执行"), {"langgraph_node": "model"})
+            yield "values", {"__interrupt__": ({"action_requests": [{"name": "execute"}]},)}
+
+    from app.engine import runner
+    final_state, hitl = await runner._stream_agent(
+        FakeInterruptAgent(), {"messages": []}, {"configurable": {"thread_id": "t"}}, card_id=None
+    )
+    assert hitl is not None
+    assert hitl["action_requests"][0]["name"] == "execute"
+
+
+# ---------- 工具调用步骤解析 ----------
+
+
+async def test_ingest_step_chunk_tool_call_and_result():
+    """工具调用增量拼参 → calling 步骤；结果返回 → done + 摘要截断。"""
+    from langchain_core.messages import AIMessageChunk, ToolMessageChunk
+    from app.engine import runner
+
+    # 增量：name 完整、args 分两段拼 JSON
+    c1 = AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            {"name": "ls", "args": '{"path": ', "id": "call_1", "index": 0}
+        ],
+    )
+    evs = runner._ingest_step_chunk(1, c1, {})
+    assert evs == [], "参数未拼完不产出步骤"
+
+    c2 = AIMessageChunk(
+        content="",
+        tool_call_chunks=[{"name": "", "args": '"/"}', "id": "call_1", "index": 0}],
+    )
+    evs = runner._ingest_step_chunk(1, c2, {})
+    assert len(evs) == 1
+    step = evs[0][1]
+    assert step["name"] == "ls"
+    assert step["args"] == {"path": "/"}
+    assert step["status"] == "calling"
+
+    # 结果返回（超长截断）
+    long_result = "x" * 600
+    tm = ToolMessageChunk(content=long_result, tool_call_id="call_1", name="ls")
+    evs = runner._ingest_step_chunk(1, tm, {})
+    assert len(evs) == 1
+    step = evs[0][1]
+    assert step["status"] == "done"
+    assert step["result"].endswith("…")
+    assert len(step["result"]) == runner.STEP_RESULT_SUMMARY_MAX + 1
+    assert len(step["result_full"]) == len(long_result)
+
+    # 落库结构：steps_buffer 完整
+    steps = runner._steps_buffer_pop(1)
+    assert len(steps) == 1
+    assert steps[0]["name"] == "ls"
+    assert steps[0]["status"] == "done"
+
+
+async def test_stream_agent_publishes_step_events():
+    """_stream_agent 将工具调用/结果经 CARD_STEP 事件发布。"""
+    from langchain_core.messages import AIMessageChunk, ToolMessageChunk
+    from app.core.event_bus import EventType
+    from app.engine import runner
+
+    class FakeStepAgent:
+        async def astream(self, input, config=None, stream_mode=None):
+            yield "messages", (AIMessageChunk(
+                content="",
+                tool_call_chunks=[{"name": "ls", "args": '{"path": "/"}', "id": "c2", "index": 0}],
+            ), {"langgraph_node": "model"})
+            yield "messages", (ToolMessageChunk(content='["AGENT.md"]', tool_call_id="c2", name="ls"), {"langgraph_node": "tool"})
+            yield "messages", (AIMessageChunk(content="目录只有 AGENT.md"), {"langgraph_node": "model"})
+            yield "values", {"messages": [AIMessageChunk(content="目录只有 AGENT.md")]}
+
+    published = []
+
+    def on_step(event):
+        published.append(event.payload["step"])
+
+    unsub = runner.bus.subscribe(EventType.CARD_STEP, on_step)
+    try:
+        await runner._stream_agent(
+            FakeStepAgent(), {"messages": []}, {"configurable": {"thread_id": "t"}}, card_id=7
+        )
+    finally:
+        unsub()
+
+    assert len(published) == 2, published
+    assert published[0]["name"] == "ls" and published[0]["status"] == "calling"
+    assert published[1]["status"] == "done"
+    assert published[1]["result"] == '["AGENT.md"]'
+    steps = runner._steps_buffer_pop(7)
+    assert len(steps) == 1
+    assert steps[0]["name"] == "ls"
+    assert steps[0]["status"] == "done"

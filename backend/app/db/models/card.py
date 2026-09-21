@@ -47,5 +47,6 @@ class Comment(Base, TimestampMixin):
     author: Mapped[str] = mapped_column(nullable=False)  # CommentAuthor
     thread_id: Mapped[str | None] = mapped_column(nullable=True)  # AI 评论关联的执行会话
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    steps: Mapped[list | None] = mapped_column(nullable=True)  # 工具调用步骤（AI 评论）
 
     card = relationship("Card", back_populates="comments", lazy="selectin")

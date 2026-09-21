@@ -19,6 +19,7 @@ Handler = Callable[["Event"], Awaitable[None]]
 
 class EventType(StrEnum):
     CARD_UPDATED = "card.updated"  # 卡片状态/提示标签/字段变更
+    CARD_STREAM = "card.stream"  # AI 回复流式增量文本（delta）
     CARD_STEP = "card.step"  # AI 执行步骤（步骤 x/y）
     COMMENT_CREATED = "comment.created"  # 新评论
     APPROVAL_PENDING = "approval.pending"  # 等待人工审批
