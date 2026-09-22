@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ArrowLeft, ArrowRight, EditPen, VideoPause, VideoPlay } from "@element-plus/icons-vue";
+import { ArrowDown, ArrowLeft, ArrowRight, EditPen, Expand, Fold, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 
 import { approveCard, executeCard, getCard, stopCard, updateCard, type Card } from "@/api/cards";
 import { EXECUTION_LABELS, TYPE_LABELS, executionTagType, typeTagStyle } from "@/constants/card";
@@ -359,6 +359,8 @@ function goBack() {
   }
 }
 
+const sideOpen = ref(false);
+
 function shortThreadId(threadId: string | null): string {
   // thread_id 形如 card-12：解析出真实卡片号，避免截断成 card-1
   if (!threadId) return "?";
@@ -385,11 +387,19 @@ function shortThreadId(threadId: string | null): string {
         >
           <el-option v-for="o in modelOptions" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
+        <el-tooltip :content="sideOpen ? '收起侧边栏' : '展开侧边栏'">
+          <el-button
+            class="side-toggle-btn"
+            :icon="sideOpen ? Fold : Expand"
+            circle
+            @click="sideOpen = !sideOpen"
+          />
+        </el-tooltip>
       </div>
     </div>
 
     <template v-if="card">
-      <div class="detail-grid">
+      <div class="detail-grid" :class="{ 'no-side': !sideOpen }">
         <div class="detail-left">
           <el-card shadow="never" class="card-panel">
         <div class="card-head">
@@ -595,18 +605,12 @@ function shortThreadId(threadId: string | null): string {
         </el-card>
         </div>
 
-        <div class="side">
-          <el-card shadow="never" class="panel">
-            <template #header>
-              <div class="panel-h">AI 执行步骤</div>
-            </template>
-            <el-empty :image-size="60" description="AI 尚未开始执行（阶段 3 接入）" />
-          </el-card>
+        <div v-if="sideOpen" class="side">
           <el-card shadow="never" class="panel">
             <template #header>
               <div class="panel-h">产物</div>
             </template>
-            <el-empty :image-size="60" description="暂无产物（AI 生成，阶段 4 接入）" />
+            <el-empty :image-size="60" description="暂无产物（AI 生成）" />
           </el-card>
         </div>
       </div>
@@ -766,6 +770,9 @@ function shortThreadId(threadId: string | null): string {
   grid-template-columns: 1fr 340px;
   gap: 16px;
   align-items: start;
+}
+.detail-grid.no-side {
+  grid-template-columns: 1fr;
 }
 @media (max-width: 900px) {
   .detail-grid {

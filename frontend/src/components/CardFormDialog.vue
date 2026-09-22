@@ -116,7 +116,7 @@ async function save() {
   >
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
       <el-form-item label="标题">
-        <el-input v-model="form.title" maxlength="200" show-word-limit placeholder="留空：创建后由 AI 自动总结（阶段 3 接入）" />
+        <el-input v-model="form.title" maxlength="200" show-word-limit placeholder="留空：创建后由 AI 自动总结标题" />
       </el-form-item>
       <el-form-item label="描述" prop="content">
         <el-input v-model="form.content" type="textarea" :rows="3" placeholder="说明需求背景等…（必填）" />
