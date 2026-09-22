@@ -93,7 +93,9 @@ onBeforeUnmount(() => {
       <RouterView :key="route.fullPath" />
     </main>
 
-    <el-button class="sidebar-fab" :icon="Menu" circle title="导航" @click="navOpen = true" />
+    <el-badge :value="unreadCount" :hidden="unreadCount === 0" :max="99" class="sidebar-fab-badge">
+      <el-button class="sidebar-fab" :icon="Menu" circle title="导航" @click="navOpen = true" />
+    </el-badge>
 
     <el-drawer v-model="navOpen" direction="ltr" size="240px" :with-header="false" class="nav-drawer">
       <div class="drawer-body">
@@ -275,11 +277,14 @@ body {
     padding: 16px 12px;
   }
 }
-.sidebar-fab {
+.sidebar-fab-badge {
   position: fixed;
   left: 12px;
   bottom: 16px;
   z-index: 40;
+  display: none;
+}
+.sidebar-fab {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
 }
 .nav-menu {
@@ -364,5 +369,12 @@ body {
   height: 8px;
   border-radius: 50%;
   background: #f56c6c;
+}
+
+/* 移动端显示悬浮球（基础规则在后，此规则须在其后以覆盖 display:none） */
+@media (max-width: 768px) {
+  .sidebar-fab-badge {
+    display: block;
+  }
 }
 </style>

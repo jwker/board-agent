@@ -2,7 +2,8 @@
 import { computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowRight, MoreFilled, Plus } from "@element-plus/icons-vue";
+import { ArrowRight, MoreFilled, Plus, Setting } from "@element-plus/icons-vue";
+import GlobalActions from "@/components/GlobalActions.vue";
 
 import { useProjectsStore } from "@/stores/projects";
 import type { Project } from "@/api/projects";
@@ -72,7 +73,10 @@ function archivedDate(iso: string): string {
         <h1 class="title">我的项目</h1>
         <p class="subtitle">点击项目进入看板 · 自动领取等设置按项目独立</p>
       </div>
-      <el-button type="primary" :icon="Plus" @click="router.push('/projects/new')">新建项目</el-button>
+      <div class="head-actions">
+        <el-button type="primary" :icon="Plus" @click="router.push('/projects/new')">新建项目</el-button>
+        <GlobalActions :show-home="false" />
+      </div>
     </div>
 
     <el-skeleton :loading="store.loading" animated :rows="3">
@@ -166,6 +170,11 @@ function archivedDate(iso: string): string {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
+}
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .title {
   font-size: 24px;

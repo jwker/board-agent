@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ChatDotRound, FolderOpened, Lock, MoreFilled, Plus, Search, Setting } from "@element-plus/icons-vue";
+import { ArrowDown, Box, ChatDotRound, FolderOpened, InfoFilled, Lock, MoreFilled, Plus, Search } from "@element-plus/icons-vue";
 import { VueDraggable } from "vue-draggable-plus";
 
 import { getProject, type Project } from "@/api/projects";
@@ -29,6 +29,7 @@ import {
   type LLMSettings,
 } from "@/api/settings";
 import CardFormDialog from "@/components/CardFormDialog.vue";
+import GlobalActions from "@/components/GlobalActions.vue";
 
 const props = defineProps<{ projectId: string }>();
 const router = useRouter();
@@ -370,9 +371,10 @@ function dueInDays(due: string): string {
           clearable
           style="width: 300px"
         />
-        <el-button :icon="FolderOpened" @click="archiveVisible = true">归档区</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate()">新建卡片</el-button>
-        <el-button class="settings-gear" :icon="Setting" circle title="项目设置" @click="openProjectSettings()" />
+        <el-button :icon="Box" circle title="归档区" @click="archiveVisible = true" />
+        <el-button class="settings-gear" :icon="InfoFilled" circle title="项目信息" @click="openProjectSettings()" />
+        <GlobalActions class="board-global" />
       </div>
     </div>
 
@@ -494,7 +496,7 @@ function dueInDays(due: string): string {
       </div>
     </el-drawer>
 
-    <el-dialog v-model="autoClaimVisible" title="项目设置" width="min(520px, 94vw)">
+    <el-dialog v-model="autoClaimVisible" title="项目信息" width="min(520px, 94vw)">
       <div class="proj-info">
         <div class="proj-info-title">项目信息</div>
         <el-descriptions :column="1" size="small" border>

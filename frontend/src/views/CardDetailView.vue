@@ -12,6 +12,7 @@ import { createComment, listComments, type Comment, type StepItem } from "@/api/
 import { getLLMSettings, type LLMSettings } from "@/api/settings";
 import { useCardsStore } from "@/stores/cards";
 import CardFormDialog from "@/components/CardFormDialog.vue";
+import GlobalActions from "@/components/GlobalActions.vue";
 import { renderMarkdown, renderStreamingMarkdown } from "@/utils/markdown";
 
 const props = defineProps<{ projectId: string; cardId: string }>();
@@ -395,6 +396,7 @@ function shortThreadId(threadId: string | null): string {
             @click="sideOpen = !sideOpen"
           />
         </el-tooltip>
+        <GlobalActions class="detail-global" />
       </div>
     </div>
 
