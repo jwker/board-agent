@@ -204,11 +204,22 @@ const columnLists: Record<CardStatus, Ref<Card[]>> = {
 };
 
 function refreshColumns() {
+  const kw = search.value.trim().toLowerCase();
   for (const col of COLUMNS) {
-    columnLists[col.key].value = cardsStore.cards.filter((c) => c.status === col.key);
+    let list = cardsStore.cards.filter((c) => c.status === col.key);
+    if (kw) {
+      list = list.filter((c) =>
+        `${c.title} ${c.content} ${(c.custom_tags ?? []).join(" ")}`.toLowerCase().includes(kw)
+      );
+    }
+    columnLists[col.key].value = list;
   }
 }
-watch(() => cardsStore.cards, refreshColumns, { immediate: true, deep: true });
+watch(
+  () => [cardsStore.cards, search.value],
+  refreshColumns,
+  { immediate: true, deep: true }
+);
 
 let dragging = false;
 function dragStart() {
