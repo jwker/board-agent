@@ -42,7 +42,6 @@ temp/
 .env.test
 .env.*.local
 
-# ===== AI 协作数据例外（.ai 已纳入版本库管理）=====
-!.ai/logs/
-!.ai/logs/*.log
+# ===== AI 协作数据（不纳入版本库）=====
+.ai/
 
