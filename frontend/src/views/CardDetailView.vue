@@ -379,7 +379,7 @@ function shortThreadId(threadId: string | null): string {
         <el-select
           v-model="sessionModel"
           placeholder="选择会话模型"
-          style="width: 280px"
+          class="model-select"
           :disabled="modelOptions.length === 0"
           @change="changeSessionModel"
         >
@@ -646,6 +646,15 @@ function shortThreadId(threadId: string | null): string {
   font-size: 13px;
   color: #606266;
 }
+.model-select {
+  width: 280px;
+}
+@media (max-width: 768px) {
+  .model-select {
+    width: 100%;
+    max-width: 280px;
+  }
+}
 .card-panel {
   border-radius: 10px;
 }
@@ -774,6 +783,25 @@ function shortThreadId(threadId: string | null): string {
   .card-head {
     flex-direction: column;
     align-items: flex-start;
+  }
+  .title-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 8px 12px;
+  }
+  .title-row .title {
+    grid-column: 1 / -1;
+    order: 2;
+    font-size: 17px;
+  }
+  .title-row .thread-badge {
+    order: 1;
+    justify-self: start;
+  }
+  .title-row .title-actions {
+    order: 1;
+    justify-self: end;
   }
 }
 .panel {

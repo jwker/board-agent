@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ChatDotRound, FolderOpened, Lock, MoreFilled, Plus, Search } from "@element-plus/icons-vue";
+import { ArrowDown, ChatDotRound, FolderOpened, Lock, MoreFilled, Plus, Search, Setting } from "@element-plus/icons-vue";
 import { VueDraggable } from "vue-draggable-plus";
 
 import { getProject, type Project } from "@/api/projects";
@@ -93,7 +93,6 @@ onMounted(async () => {
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "加载项目失败");
   }
-  await projectsStore.fetchProjects();
   await cardsStore.fetchCards(projectId);
   try {
     autoClaim.value = await getAutoClaim(projectId);
@@ -128,6 +127,11 @@ onBeforeUnmount(() => {
 
 async function openProjectSettings(): Promise<void> {
   try {
+    project.value = await getProject(projectId);
+  } catch {
+    /* 保留已有详情 */
+  }
+  try {
     autoClaim.value = await getAutoClaim(projectId);
   } catch {
     /* 保持默认 */
@@ -144,6 +148,17 @@ async function openProjectSettings(): Promise<void> {
     /* 未配置时下拉仅“跟随全局默认” */
   }
   autoClaimVisible.value = true;
+}
+
+const projectStats = computed(() => {
+  if (project.value?.stats) return project.value.stats;
+  const p = projectsStore.projects.find((x) => x.id === project.value?.id);
+  return p?.stats ?? null;
+});
+
+function formatTime(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 async function saveProjectSettings(): Promise<void> {
@@ -170,6 +185,12 @@ const cardsByStatus = computed(() => {
     (map[card.status] ??= []).push(card);
   }
   return map;
+});
+
+/* ---- 移动端判定 ---- */
+const isMobile = ref(window.matchMedia("(max-width: 768px)").matches);
+window.matchMedia("(max-width: 768px)").addEventListener("change", (e) => {
+  isMobile.value = e.matches;
 });
 
 /* ---- 拖拽（vue-draggable-plus 跨列移动） ---- */
@@ -349,15 +370,9 @@ function dueInDays(due: string): string {
           clearable
           style="width: 300px"
         />
-        <el-button
-          class="auto-claim-btn"
-          :class="{ on: autoClaim.enabled }"
-          @click="openProjectSettings()"
-        >
-          项目设置{{ autoClaim.enabled ? ` · 自动领取 ${autoClaim.start_time}-${autoClaim.end_time}` : "" }}
-        </el-button>
         <el-button :icon="FolderOpened" @click="archiveVisible = true">归档区</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate()">新建卡片</el-button>
+        <el-button class="settings-gear" :icon="Setting" circle title="项目设置" @click="openProjectSettings()" />
       </div>
     </div>
 
@@ -386,6 +401,7 @@ function dueInDays(due: string): string {
             :animation="150"
             ghost-class="card-ghost"
             :sort="true"
+            :disabled="isMobile"
             @start="dragStart"
             @end="dragEnd"
             @add="(e: any) => onAdd(col.key, e)"
@@ -478,7 +494,24 @@ function dueInDays(due: string): string {
       </div>
     </el-drawer>
 
-    <el-dialog v-model="autoClaimVisible" title="项目设置" width="460px">
+    <el-dialog v-model="autoClaimVisible" title="项目设置" width="min(520px, 94vw)">
+      <div class="proj-info">
+        <div class="proj-info-title">项目信息</div>
+        <el-descriptions :column="1" size="small" border>
+          <el-descriptions-item label="项目名称">{{ project?.name ?? "-" }}</el-descriptions-item>
+          <el-descriptions-item label="描述">{{ project?.description || "—" }}</el-descriptions-item>
+          <el-descriptions-item label="授权目录">{{ project?.directory || "未配置" }}</el-descriptions-item>
+          <el-descriptions-item label="创建时间">{{ project ? formatTime(project.created_at) : "-" }}</el-descriptions-item>
+          <el-descriptions-item label="卡片统计">
+            {{
+              projectStats
+                ? `${projectStats.total} 张卡片 · ${projectStats.in_progress} 进行中 · ${projectStats.done} 已完成`
+                : "-"
+            }}
+          </el-descriptions-item>
+        </el-descriptions>
+      </div>
+      <el-divider />
       <el-form label-width="90px" label-position="left">
         <el-form-item label="默认模型">
           <el-select v-model="projectModel" placeholder="跟随全局默认" clearable style="width: 100%">
@@ -579,6 +612,15 @@ function dueInDays(due: string): string {
   font-size: 12px;
   color: #c0c4cc;
   line-height: 1.5;
+}
+.settings-gear {
+  margin-left: 2px;
+}
+.proj-info-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #606266;
+  margin-bottom: 8px;
 }
 .search-input :deep(.el-input__wrapper) {
   background: #fff;
